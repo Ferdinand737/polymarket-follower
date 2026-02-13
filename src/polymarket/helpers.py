@@ -185,7 +185,9 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
     logger.log(f"Processing {len(new_target_activities)} new activities")
     
     consumed = get_consumed_transactions()
-    processed_markets = set()
+    
+    # First pass: group activities by (asset, side, price) for aggregation
+    aggregation_map = {}  # (asset, side, price) -> list of activities
     
     for target_activity in new_target_activities:
         tx_hash = target_activity.get("transactionHash")
@@ -194,41 +196,15 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
             
         match target_activity.get("type"):
             case "TRADE":
-
                 asset = target_activity.get("asset")
                 side = target_activity.get("side")
                 price = target_activity.get("price")
-                market = target_activity.get("conditionId")
-                target_address = target_activity.get("proxyWallet")
-
-                if side == 'SELL':
-                    positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
-                    user_share_position = next((p for p in positions if p.get("asset") == asset), None)
-
-                    if not user_share_position:
-                        logger.log("User does not hold shares, skipping.", log_type=LogType.WARNING)
-                        continue
+                key = (asset, side, price)
                 
+                if key not in aggregation_map:
+                    aggregation_map[key] = []
+                aggregation_map[key].append(target_activity)
                 
-                aggregation_key = (asset, side, price)
-                if aggregation_key in processed_markets:
-                    continue
-                processed_markets.add(aggregation_key)
-                
-                aggregated = fetch_market_trades_for_aggregation(
-                    target_address, market, asset, side, price
-                )
-                
-                if aggregated:
-                    tx_hashes = aggregated.get("_aggregated_tx_hashes", [tx_hash])
-                    success = False
-                    if side == "BUY":
-                        success = buy_activity(aggregated)
-                    elif side == "SELL":
-                        success = sell_activity(aggregated, user_share_position)
-                    
-                    if success:
-                        add_consumed_transactions(tx_hashes)
             case "SPLIT":
                 split_activity(target_activity)
             case "MERGE":
@@ -244,6 +220,67 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
             case _:
                 logger.log(f"Unknown activity type: {target_activity.get('type')}", LogType.WARNING)
                 continue
+    
+    # Second pass: process aggregated trades
+    for (asset, side, price), activities in aggregation_map.items():
+        # Get user position for SELL activities
+        user_token_position = None
+        if side == 'SELL':
+            positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
+            user_token_position = next((p for p in positions if p.get("asset") == asset), None)
+            if not user_token_position:
+                logger.log("User does not hold shares, skipping.", log_type=LogType.WARNING)
+                continue
+        
+        # Aggregate ALL activities in the batch for this key
+        total_size = sum(a.get("size", 0) for a in activities)
+        total_usdc = sum(a.get("usdcSize", 0) for a in activities)
+        rounded_usdc = round(total_usdc, 2)
+        
+        # Check consumed transactions from this batch
+        consumed_for_key = [a for a in activities if a.get("transactionHash") in consumed]
+        consumed_size = sum(a.get("size", 0) for a in consumed_for_key)
+        consumed_usdc = sum(a.get("usdcSize", 0) for a in consumed_for_key)
+        
+        # Calculate remaining after consumed
+        remaining_size = total_size - consumed_size
+        remaining_usdc = total_usdc - consumed_usdc
+        remaining_rounded = round(remaining_usdc, 2)
+        
+        if remaining_rounded < 0.01:
+            logger.log(f"Activity {side} {asset} @ {price}: remaining ${remaining_usdc:.4f} too small, skipping")
+            # Mark all as consumed to avoid reprocessing
+            all_tx_hashes = [a.get("transactionHash") for a in activities]
+            add_consumed_transactions(all_tx_hashes)
+            continue
+        
+        # Track which tx_hashes are being processed (not consumed yet)
+        tx_hashes = [a.get("transactionHash") for a in activities if a.get("transactionHash") not in consumed]
+        
+        if not tx_hashes:
+            continue
+        
+        # Create aggregated activity from the most recent activity
+        most_recent = activities[0]  # Already sorted by fetch_activities (DESC by timestamp)
+        aggregated = most_recent.copy()
+        aggregated["size"] = remaining_size
+        aggregated["usdcSize"] = remaining_usdc
+        aggregated["_aggregated_count"] = len(activities)
+        aggregated["_aggregated_original_count"] = len(activities)
+        aggregated["_aggregated_consumed_count"] = len(consumed_for_key)
+        aggregated["_aggregated_tx_hashes"] = tx_hashes
+        
+        logger.log(f"Aggregated {len(activities)} trades: {side} {remaining_size:.4f} shares @ {price} = ${remaining_usdc:.2f} (after {len(consumed_for_key)} consumed)")
+        
+        # Process the aggregated activity
+        success = False
+        if side == "BUY":
+            success = buy_activity(aggregated)
+        elif side == "SELL":
+            success = sell_activity(aggregated, user_token_position)
+        
+        if success:
+            add_consumed_transactions(tx_hashes)
 
 
 def get_neg_risk_market_id(slug: str) -> str:
