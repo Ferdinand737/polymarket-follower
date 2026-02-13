@@ -7,11 +7,14 @@ from utils.logger import Logger, Whomst, LogType
 
 def main():
 
-    current_target_address = None
-
     logger = Logger(Whomst.POLYMARKET_FOLLOWER)
     
     logger.log("Starting follower...")
+    
+    # Load current target from file (persists across restarts)
+    current_target_address = get_current_target_address()
+    logger.log(f"Loaded current target from file: {current_target_address}")
+    
     while True:
         try:
             logger.log(f"Current target address: {current_target_address}")
@@ -28,11 +31,16 @@ def main():
             logger.log(f"Target address: {target_address}")
             
             if target_address != current_target_address:
-                logger.log(f"Target address changed from {current_target_address} to {target_address}")
-
-                sell_all_positions()
-
+                if current_target_address is None:
+                    logger.log(f"No previous target address, starting fresh with {target_address}")
+                else:
+                    logger.log(f"Target address changed from {current_target_address} to {target_address}")
+                    logger.log("Selling all positions due to target change...")
+                    sell_all_positions()
+                
+                clear_consumed_transactions()
                 current_target_address = target_address
+                save_current_target_address(current_target_address)
                 continue
 
             
@@ -58,9 +66,13 @@ def main():
             
         except KeyboardInterrupt:
             logger.log("Follower stopped by user.", LogType.INFO)
+            save_current_target_address(current_target_address)
+            logger.log(f"Saved current target address: {current_target_address}")
             break
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
+            save_current_target_address(current_target_address)
+            logger.log(f"Saved current target address: {current_target_address}")
             break
             
 

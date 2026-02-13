@@ -10,9 +10,17 @@ from py_builder_signing_sdk.signing.hmac import build_hmac_signature
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 from py_builder_relayer_client.client import RelayClient, TransactionType, BuilderConfig
 from web3 import Web3
+from decimal import Decimal, ROUND_DOWN
+
 
 
 logger = Logger(Whomst.POLYMARKET_FOLLOWER)
+
+
+def calculate_valid_size(usdc_amount: float, price: float, decimals: int = 4) -> float:
+    size = Decimal(str(usdc_amount)) / Decimal(str(price))
+    quantize_str = '0.' + '0' * decimals
+    return float(size.quantize(Decimal(quantize_str), rounding=ROUND_DOWN))
 
 
 client = ClobClient(host="https://clob.polymarket.com", key=PRIVATE_KEY, chain_id=137)
@@ -54,21 +62,15 @@ def sell_all_positions():
 def sell_position(position: Dict[str, Any]):
     logger.log(f"Selling position: ${position.get("currentValue")} {position.get("title")}")
 
-    current_price = position.get("curPrice")
-    size = position.get("size")
+    target_price = position.get("curPrice")
+    size = round(position.get("size"), 4)
     token_id = position.get("asset")
 
-    if size < 5:
-        logger.log("Position size is less than 5, skipping.")
-        return
-
-    order_id = None
-    while True:
-        if current_price < 0.01:
-            logger.log("Price dropped below 0.01, stopping sell attempts.", LogType.WARNING)
-            return
-
-        logger.log(f"Attempting to sell at price: {current_price}")
+    current_price = target_price + 0.01
+    min_price = max(0.01, target_price - 0.02)
+    
+    while current_price >= min_price:
+        logger.log(f"Attempting to sell {size} shares at price: {current_price}")
 
         order_args = OrderArgs(
             price=current_price,
@@ -78,33 +80,26 @@ def sell_position(position: Dict[str, Any]):
         )
 
         try:
-            logger.log("Creating order...")
             signed_order = client.create_order(order_args)
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
             return
 
         try:
-            if order_id:
-                logger.log(f"Cancelling previous order {order_id}...")
-                client.cancel(order_id)
-            logger.log("Posting order...")
-            resp = client.post_order(signed_order, OrderType.GTC)
-            order_id = resp.get("orderID")
+            resp = client.post_order(signed_order, OrderType.FOK)
+            status = resp.get("status")
+            if status == "MATCHED":
+                logger.log(f"FOK order filled! Sold {size} shares at {current_price}")
+                return
+            else:
+                logger.log(f"FOK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
             return
 
-        logger.log("Waiting for order to be filled...")
-        for _ in range(6):
-            time.sleep(5)
-            order_status = client.get_order(order_id)
-            if order_status.get("status") == "FILLED":
-                logger.log("Order filled successfully!")
-                return
-
-        logger.log(f"Order not filled at price {current_price}, reducing price by 0.01...")
         current_price = round(current_price - 0.01, 2)
+
+    logger.log(f"Could not fill order within 0.02 of target price {target_price}, giving up.", LogType.WARNING)
 
 
 
@@ -120,18 +115,20 @@ def fetch_positions(address: str):
     return positions_data
 
 
-def fetch_activities(address: str, interval_ago_ts: int):
+def fetch_activities(address: str, interval_ago_ts: int = None, market: str = None, limit: int = 10):
     address_type = "target" if address != POLY_MARKET_FUNDER_ADDRESS else "user"
     logger.log(f"Fetching activities for {address} ({address_type})")
     url = "https://data-api.polymarket.com/activity"
     params = {
         "user": address,
-        "limit": 10,
+        "limit": limit,
         "sortBy": "TIMESTAMP",
         "sortDirection": "DESC"
     }
     if interval_ago_ts:
         params["start"] = interval_ago_ts
+    if market:
+        params["market"] = market
     response = requests.get(url, params=params)
     response.raise_for_status()
     activity_data = response.json()
@@ -145,15 +142,93 @@ def compare_activities(target_activity: List[Dict[str, Any]], user_activity: Lis
     return new_activities
 
 
+def fetch_market_trades_for_aggregation(target_address: str, market: str, asset: str, side: str, price: float) -> Dict[str, Any]:
+    consumed = get_consumed_transactions()
+    
+    logger.log(f"Fetching full market history for aggregation: {market}")
+    all_market_activities = fetch_activities(target_address, market=market, limit=100)
+    
+    matching_trades = []
+    for activity in all_market_activities:
+        tx_hash = activity.get("transactionHash")
+        if tx_hash in consumed:
+            continue
+        if activity.get("type") != "TRADE":
+            continue
+        if activity.get("asset") == asset and activity.get("side") == side and activity.get("price") == price:
+            matching_trades.append(activity)
+    
+    if not matching_trades:
+        return None
+    
+    total_size = sum(t.get("size", 0) for t in matching_trades)
+    total_usdc = sum(t.get("usdcSize", 0) for t in matching_trades)
+    rounded_usdc = round(total_usdc, 2)
+    
+    if rounded_usdc < 0.01:
+        logger.log(f"Aggregate too small: {len(matching_trades)} trades, ${total_usdc:.4f} total")
+        return None
+    
+    tx_hashes = [t.get("transactionHash") for t in matching_trades]
+    
+    combined = matching_trades[0].copy()
+    combined["size"] = total_size
+    combined["usdcSize"] = total_usdc
+    combined["_aggregated_tx_hashes"] = tx_hashes
+    combined["_aggregated_count"] = len(matching_trades)
+    
+    logger.log(f"Aggregated {len(matching_trades)} trades: {side} {total_size:.4f} shares @ {price} = ${total_usdc:.2f}")
+    return combined
+
+
 def process_new_activities(new_target_activities: List[Dict[str, Any]]):
     logger.log(f"Processing {len(new_target_activities)} new activities")
+    
+    consumed = get_consumed_transactions()
+    processed_markets = set()
+    
     for target_activity in new_target_activities:
+        tx_hash = target_activity.get("transactionHash")
+        if tx_hash in consumed:
+            continue
+            
         match target_activity.get("type"):
             case "TRADE":
-                if target_activity.get("side") == "BUY":
-                    buy_activity(target_activity)
-                elif target_activity.get("side") == "SELL":
-                    sell_activity(target_activity)
+
+                asset = target_activity.get("asset")
+                side = target_activity.get("side")
+                price = target_activity.get("price")
+                market = target_activity.get("conditionId")
+                target_address = target_activity.get("proxyWallet")
+
+                if side == 'SELL':
+                    positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
+                    user_share_position = next((p for p in positions if p.get("asset") == asset), None)
+
+                    if not user_share_position:
+                        logger.log("User does not hold shares, skipping.", log_type=LogType.WARNING)
+                        continue
+                
+                
+                aggregation_key = (asset, side, price)
+                if aggregation_key in processed_markets:
+                    continue
+                processed_markets.add(aggregation_key)
+                
+                aggregated = fetch_market_trades_for_aggregation(
+                    target_address, market, asset, side, price
+                )
+                
+                if aggregated:
+                    tx_hashes = aggregated.get("_aggregated_tx_hashes", [tx_hash])
+                    success = False
+                    if side == "BUY":
+                        success = buy_activity(aggregated)
+                    elif side == "SELL":
+                        success = sell_activity(aggregated, user_share_position)
+                    
+                    if success:
+                        add_consumed_transactions(tx_hashes)
             case "SPLIT":
                 split_activity(target_activity)
             case "MERGE":
@@ -172,7 +247,6 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
 
 
 def get_neg_risk_market_id(slug: str) -> str:
-    """Fetch negRiskMarketID from Gamma API using slug."""
     logger.log(f"Fetching negRiskMarketID for slug: {slug}")
     url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
     response = requests.get(url)
@@ -184,7 +258,6 @@ def get_neg_risk_market_id(slug: str) -> str:
 
 
 def decode_index_set_from_tx(tx_hash: str) -> int:
-    """Decode the indexSet from a convertPositions transaction."""
     logger.log(f"Decoding indexSet from transaction: {tx_hash}")
     url = "https://api.etherscan.io/v2/api"
     params = {
@@ -199,10 +272,7 @@ def decode_index_set_from_tx(tx_hash: str) -> int:
     tx_data = response.json()
     
     input_data = tx_data["result"]["input"]
-    # convertPositions(bytes32 _marketId, uint256 _indexSet, uint256 _amount)
-    # Layout: 0x<4 bytes selector><32 bytes marketId><32 bytes indexSet><32 bytes amount>
-    # indexSet is at bytes 36-68 (characters 10+64 to 10+128 in hex string)
-    index_set_hex = input_data[74:138]  # Skip "0x" + 4 byte selector + 32 byte marketId
+    index_set_hex = input_data[74:138]
     index_set = int(index_set_hex, 16)
     logger.log(f"Decoded indexSet: {index_set}")
     return index_set
@@ -211,21 +281,11 @@ def decode_index_set_from_tx(tx_hash: str) -> int:
 def convert_activity(target_activity: Dict[str, Any]):
     logger.log(f"Processing convert activity: {target_activity.get('title')}")
     
-    target_size = target_activity.get("size")  # Token amount
+    target_size = target_activity.get("size")
     target_usdc_size = target_activity.get("usdcSize")
-    
-    if target_size < 5:
-        logger.log("Target convert size is less than 5, skipping.", LogType.WARNING)
-        return
-    
-    # 1. Get marketId from Gamma API using slug
     slug = target_activity.get("slug")
     market_id = get_neg_risk_market_id(slug)
-    
-    # 2. Get indexSet by decoding target's transaction
     index_set = decode_index_set_from_tx(target_activity.get("transactionHash"))
-    
-    # 3. Calculate proportional user amount based on token size
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", LogType.WARNING)
@@ -235,20 +295,11 @@ def convert_activity(target_activity: Dict[str, Any]):
     logger.log(f"Fraction of target portfolio: {fraction_of_target_portfolio}")
     
     user_portfolio_usdc_value = get_portfolio_usdc_value(POLY_MARKET_FUNDER_ADDRESS)
-    
-    # Calculate user token amount proportionally from target's token size
     user_token_amount = fraction_of_target_portfolio * user_portfolio_usdc_value / (target_usdc_size / target_size) if target_size > 0 else 0
-    
     logger.log(f"User token amount to convert: {user_token_amount}")
-    
-    # Convert to raw amount (6 decimals for conditional tokens)
     user_amount_raw = int(user_token_amount * 10**6)
     
     logger.log(f"Convert details - marketId: {market_id}, indexSet: {index_set}, amount: {user_amount_raw}")
-    
-    if user_token_amount < 5:
-        logger.log("User token amount to convert is less than 5, skipping.", LogType.WARNING)
-        return
     
     try:
         convert_tx = {
@@ -267,19 +318,15 @@ def convert_activity(target_activity: Dict[str, Any]):
         logger.log(str(e), LogType.ERROR)
         return
 
-def buy_activity(target_activity: Dict[str, Any]):
-    logger.log(f"Buying activity: {target_activity.get("title")}")
+def buy_activity(target_activity: Dict[str, Any]) -> bool:
+    logger.log(f"Buying activity: {target_activity.get('title')}")
 
     target_usdc_size = target_activity.get("usdcSize")
-    target_size = target_activity.get("size")
-    if target_size < 5:
-        logger.log("Position size is less than 5, skipping.", log_type=LogType.WARNING)
-        return
 
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", log_type=LogType.WARNING)
-        return
+        return False
 
     fraction_of_target_portfolio = target_usdc_size / target_portfolio_value
     logger.log(f"Fraction of target portfolio: {fraction_of_target_portfolio}")
@@ -291,32 +338,25 @@ def buy_activity(target_activity: Dict[str, Any]):
 
     user_total_usdc_value = user_portfolio_usdc_value + user_cash
 
-    user_size_to_buy_usdc = fraction_of_target_portfolio * user_total_usdc_value
+    user_size_to_buy_usdc = round(fraction_of_target_portfolio * user_total_usdc_value, 2)
 
     logger.log(f"User size to buy usdc: {user_size_to_buy_usdc}")
     if user_size_to_buy_usdc > user_cash:
         logger.log("User size to buy is more than cash available, skipping.", log_type=LogType.WARNING)
-        return
+        return False
 
     target_price = target_activity.get("price")
     if not target_price or target_price == 0:
         logger.log("Target price is zero or unavailable, skipping.", log_type=LogType.WARNING)
-        return
+        return False
 
-    user_size_to_buy = user_size_to_buy_usdc / target_price
-
-    if user_size_to_buy < 5:
-        logger.log("User size to buy is less than 5, skipping.", log_type=LogType.WARNING)
-        return
-
-    current_price = target_price
-    order_id = None
-    while True:
-        if current_price > target_price + 2:
-            logger.log("Price exceeded target price + 2, stopping buy attempts.", LogType.WARNING)
-            return
-
-        logger.log(f"Attempting to buy at price: {current_price}")
+    current_price = round(target_price - 0.01, 2)
+    max_price = target_price + 0.02
+    
+    while current_price <= max_price:
+        user_size_to_buy = calculate_valid_size(user_size_to_buy_usdc, current_price, decimals=4)
+        
+        logger.log(f"Attempting to buy {user_size_to_buy} shares at price: {current_price}")
 
         order_args = OrderArgs(
             price=current_price,
@@ -326,91 +366,68 @@ def buy_activity(target_activity: Dict[str, Any]):
         )
 
         try:
-            logger.log("Creating order...")
             signed_order = client.create_order(order_args)
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
-            return
+            return False
 
         try:
-            if order_id:
-                logger.log(f"Cancelling previous order {order_id}...")
-                client.cancel(order_id)
-            logger.log("Posting order...")
-            resp = client.post_order(signed_order, OrderType.GTC)
-            order_id = resp.get("orderID")
+            resp = client.post_order(signed_order, OrderType.FOK)
+            status = resp.get("status")
+            if status == "MATCHED":
+                logger.log(f"FOK order filled! Bought {user_size_to_buy} shares at {current_price}")
+                return True
+            else:
+                logger.log(f"FOK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
-            return
+            return False
 
-        logger.log("Waiting for order to be filled...")
-        for _ in range(6):
-            time.sleep(5)
-            order_status = client.get_order(order_id)
-            if order_status.get("status") == "FILLED":
-                logger.log("Order filled successfully!")
-                return
-
-        logger.log(f"Order not filled at price {current_price}, increasing price by 0.01...")
         current_price = round(current_price + 0.01, 2)
 
+    logger.log(f"Could not fill order within 0.02 of target price {target_price}, giving up.", LogType.WARNING)
+    return False
 
 
-def sell_activity(target_activity: Dict[str, Any]):
-    logger.log(f"Selling activity: {target_activity.get("title")}")
+def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str, Any]) -> bool:
+    logger.log(f"Selling activity: {target_activity.get('title')}")
 
     target_usdc_size = target_activity.get("usdcSize")
-    target_size = target_activity.get("size")
-    if target_size < 5:
-        logger.log("Position size is less than 5, skipping.", log_type=LogType.WARNING)
-        return
 
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", log_type=LogType.WARNING)
-        return
+        return False
 
     fraction_of_target_portfolio = target_usdc_size / target_portfolio_value
     logger.log(f"Fraction of target portfolio: {fraction_of_target_portfolio}")
 
     user_portfolio_usdc_value = get_portfolio_usdc_value(POLY_MARKET_FUNDER_ADDRESS)
 
-    user_size_to_sell_usdc = fraction_of_target_portfolio * user_portfolio_usdc_value
+    user_size_to_sell_usdc = round(fraction_of_target_portfolio * user_portfolio_usdc_value, 2)
 
     logger.log(f"User size to sell usdc: {user_size_to_sell_usdc}")
 
     target_price = target_activity.get("price")
     if not target_price or target_price == 0:
         logger.log("Target price is zero or unavailable, skipping.", log_type=LogType.WARNING)
-        return
+        return False
 
-    user_size_to_sell = user_size_to_sell_usdc / target_price
-
-    if user_size_to_sell < 5:
-        logger.log("User size to sell is less than 5, skipping.", log_type=LogType.WARNING)
-        return
-
-    positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
     token_id = target_activity.get("asset")
-    user_token_position = next((p for p in positions if p.get("asset") == token_id), None)
 
-    if not user_token_position:
-        logger.log("User does not hold this token, skipping.", log_type=LogType.WARNING)
-        return
+    user_share_size = user_token_position.get("size")
+    needed_size = user_size_to_sell_usdc / target_price
+    if user_share_size < needed_size:
+        logger.log(f"User shares ({user_share_size}) is less than needed ({needed_size}), selling all available.", log_type=LogType.WARNING)
+        user_size_to_sell_usdc = user_share_size * target_price
 
-    user_token_size = user_token_position.get("size")
-    if user_token_size < user_size_to_sell:
-        logger.log(f"User token size ({user_token_size}) is less than size to sell ({user_size_to_sell}), skipping.", log_type=LogType.WARNING)
-        return
-
-    current_price = target_price
-    order_id = None
-    while True:
-        if current_price < target_price - 2:
-            logger.log("Price dropped below target price - 2, stopping sell attempts.", LogType.WARNING)
-            return
-
-        logger.log(f"Attempting to sell at price: {current_price}")
+    current_price = round(target_price + 0.01, 2)
+    min_price = max(0.01, target_price - 0.02)
+    
+    while current_price >= min_price:
+        user_size_to_sell = calculate_valid_size(user_size_to_sell_usdc, current_price, decimals=4)
+        
+        logger.log(f"Attempting to sell {user_size_to_sell} shares at price: {current_price}")
 
         order_args = OrderArgs(
             price=current_price,
@@ -420,47 +437,36 @@ def sell_activity(target_activity: Dict[str, Any]):
         )
 
         try:
-            logger.log("Creating order...")
             signed_order = client.create_order(order_args)
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
-            return
+            return False
 
         try:
-            if order_id:
-                logger.log(f"Cancelling previous order {order_id}...")
-                client.cancel(order_id)
-            logger.log("Posting order...")
-            resp = client.post_order(signed_order, OrderType.GTC)
-            order_id = resp.get("orderID")
+            resp = client.post_order(signed_order, OrderType.FOK)
+            status = resp.get("status")
+            if status == "MATCHED":
+                logger.log(f"FOK order filled! Sold {user_size_to_sell} shares at {current_price}")
+                return True
+            else:
+                logger.log(f"FOK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
-            return
+            return False
 
-        logger.log("Waiting for order to be filled...")
-        for _ in range(6):
-            time.sleep(5)
-            order_status = client.get_order(order_id)
-            if order_status.get("status") == "FILLED":
-                logger.log("Order filled successfully!")
-                return
-
-        logger.log(f"Order not filled at price {current_price}, reducing price by 0.01...")
         current_price = round(current_price - 0.01, 2)
+
+    logger.log(f"Could not fill order within 0.02 of target price {target_price}, giving up.", LogType.WARNING)
+    return False
 
 
 def split_activity(target_activity: Dict[str, Any]):
     logger.log(f"Processing split activity: {target_activity.get('title')}")
     
     condition_id = target_activity.get("conditionId")
-    target_size = target_activity.get("size")
     target_usdc_size = target_activity.get("usdcSize")
     partition = [1, 2]
     
-    if target_size < 5:
-        logger.log("Target split size is less than 5, skipping.", LogType.WARNING)
-        return
-
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", LogType.WARNING)
@@ -483,10 +489,6 @@ def split_activity(target_activity: Dict[str, Any]):
     
     logger.log(f"Split details - conditionId: {condition_id}, amount: {user_size_to_split}, partition: {partition}")
     
-    if user_size_to_split < 5:
-        logger.log("User size to split is less than 5, skipping.", LogType.WARNING)
-        return
-
     user_cash = get_on_chain_usdc_balance(POLY_MARKET_FUNDER_ADDRESS)
     logger.log(f"User USDC balance: {user_cash}")
 
@@ -494,7 +496,6 @@ def split_activity(target_activity: Dict[str, Any]):
         logger.log(f"Insufficient USDC balance. Need {user_size_to_split_usdc}, have {user_cash}", LogType.WARNING)
         return
 
-    # Convert to raw amount (6 decimals)
     user_amount_raw = int(user_size_to_split_usdc * 10**6)
 
     try:
@@ -518,14 +519,10 @@ def merge_activity(target_activity: Dict[str, Any]):
     logger.log(f"Processing merge activity: {target_activity.get('title')}")
     
     condition_id = target_activity.get("conditionId")
-    target_size = target_activity.get("size")
     target_usdc_size = target_activity.get("usdcSize")
     partition = [1, 2]
     
-    if target_size < 5:
-        logger.log("Target merge size is less than 5, skipping.", LogType.WARNING)
-        return
-
+   
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", LogType.WARNING)
@@ -545,14 +542,7 @@ def merge_activity(target_activity: Dict[str, Any]):
         return
 
     user_size_to_merge = user_size_to_merge_usdc / target_price
-    
     logger.log(f"Merge details - conditionId: {condition_id}, amount: {user_size_to_merge}, partition: {partition}")
-    
-    if user_size_to_merge < 5:
-        logger.log("User size to merge is less than 5, skipping.", LogType.WARNING)
-        return
-
-    # Convert to raw amount (6 decimals)
     user_amount_raw = int(user_size_to_merge_usdc * 10**6)
 
     try:
