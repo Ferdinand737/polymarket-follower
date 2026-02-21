@@ -11,6 +11,7 @@ from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 from py_builder_relayer_client.client import RelayClient, TransactionType, BuilderConfig
 from web3 import Web3
 from decimal import Decimal, ROUND_DOWN
+from math import gcd
 
 
 
@@ -18,9 +19,13 @@ logger = Logger(Whomst.POLYMARKET_FOLLOWER)
 
 
 def calculate_valid_size(usdc_amount: float, price: float, decimals: int = 4) -> float:
-    size = Decimal(str(usdc_amount)) / Decimal(str(price))
-    quantize_str = '0.' + '0' * decimals
-    return float(size.quantize(Decimal(quantize_str), rounding=ROUND_DOWN))
+    price_cents = int(round(price * 100))
+    scale = 10 ** decimals
+    # size_raw * price_cents must be divisible by scale for maker amount to have <= 2 decimals
+    step = scale // gcd(price_cents, scale)
+    max_size_raw = int(Decimal(str(usdc_amount)) * scale / Decimal(str(price)))
+    size_raw = (max_size_raw // step) * step
+    return size_raw / scale
 
 
 client = ClobClient(host="https://clob.polymarket.com", key=PRIVATE_KEY, chain_id=137)
@@ -35,7 +40,7 @@ client = ClobClient(
     signature_type=2,
     funder=POLY_MARKET_FUNDER_ADDRESS
 )
-
+ 
 builder_config = BuilderConfig(
     local_builder_creds=BuilderApiKeyCreds(
         key=os.getenv("POLY_MARKET_API_KEY"),
@@ -134,58 +139,10 @@ def fetch_activities(address: str, interval_ago_ts: int = None, market: str = No
     activity_data = response.json()
     return activity_data
 
-
-def compare_activities(target_activity: List[Dict[str, Any]], user_activity: List[Dict[str, Any]]):
-    logger.log(f"Comparing activities for target and user")
-    user_transaction_hashes = {activity.get("transactionHash") for activity in user_activity}
-    new_activities = [activity for activity in target_activity if activity.get("transactionHash") not in user_transaction_hashes]
-    return new_activities
-
-
-def fetch_market_trades_for_aggregation(target_address: str, market: str, asset: str, side: str, price: float) -> Dict[str, Any]:
-    consumed = get_consumed_transactions()
-    
-    logger.log(f"Fetching full market history for aggregation: {market}")
-    all_market_activities = fetch_activities(target_address, market=market, limit=100)
-    
-    matching_trades = []
-    for activity in all_market_activities:
-        tx_hash = activity.get("transactionHash")
-        if tx_hash in consumed:
-            continue
-        if activity.get("type") != "TRADE":
-            continue
-        if activity.get("asset") == asset and activity.get("side") == side and activity.get("price") == price:
-            matching_trades.append(activity)
-    
-    if not matching_trades:
-        return None
-    
-    total_size = sum(t.get("size", 0) for t in matching_trades)
-    total_usdc = sum(t.get("usdcSize", 0) for t in matching_trades)
-    rounded_usdc = round(total_usdc, 2)
-    
-    if rounded_usdc < 0.01:
-        logger.log(f"Aggregate too small: {len(matching_trades)} trades, ${total_usdc:.4f} total")
-        return None
-    
-    tx_hashes = [t.get("transactionHash") for t in matching_trades]
-    
-    combined = matching_trades[0].copy()
-    combined["size"] = total_size
-    combined["usdcSize"] = total_usdc
-    combined["_aggregated_tx_hashes"] = tx_hashes
-    combined["_aggregated_count"] = len(matching_trades)
-    
-    logger.log(f"Aggregated {len(matching_trades)} trades: {side} {total_size:.4f} shares @ {price} = ${total_usdc:.2f}")
-    return combined
-
-
 def process_new_activities(new_target_activities: List[Dict[str, Any]]):
     logger.log(f"Processing {len(new_target_activities)} new activities")
     
     consumed = get_consumed_transactions()
-    processed_markets = set()
     
     for target_activity in new_target_activities:
         tx_hash = target_activity.get("transactionHash")
@@ -194,56 +151,49 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
             
         match target_activity.get("type"):
             case "TRADE":
-
                 asset = target_activity.get("asset")
                 side = target_activity.get("side")
-                price = target_activity.get("price")
-                market = target_activity.get("conditionId")
-                target_address = target_activity.get("proxyWallet")
-
+                
+                # Get user position for SELL activities
+                user_token_position = None
                 if side == 'SELL':
                     positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
-                    user_share_position = next((p for p in positions if p.get("asset") == asset), None)
-
-                    if not user_share_position:
+                    user_token_position = next((p for p in positions if p.get("asset") == asset), None)
+                    if not user_token_position:
                         logger.log("User does not hold shares, skipping.", log_type=LogType.WARNING)
+                        add_consumed_transactions([tx_hash])
                         continue
                 
+                # Process the trade
+                success = False
+                if side == "BUY":
+                    success = buy_activity(target_activity)
+                elif side == "SELL":
+                    success = sell_activity(target_activity, user_token_position)
                 
-                aggregation_key = (asset, side, price)
-                if aggregation_key in processed_markets:
-                    continue
-                processed_markets.add(aggregation_key)
+                if success:
+                    add_consumed_transactions([tx_hash])
+                # If not successful (too small), we skip it - don't mark consumed, will be ignored on next cycle
                 
-                aggregated = fetch_market_trades_for_aggregation(
-                    target_address, market, asset, side, price
-                )
-                
-                if aggregated:
-                    tx_hashes = aggregated.get("_aggregated_tx_hashes", [tx_hash])
-                    success = False
-                    if side == "BUY":
-                        success = buy_activity(aggregated)
-                    elif side == "SELL":
-                        success = sell_activity(aggregated, user_share_position)
-                    
-                    if success:
-                        add_consumed_transactions(tx_hashes)
             case "SPLIT":
                 split_activity(target_activity)
+                add_consumed_transactions([tx_hash])
             case "MERGE":
                 merge_activity(target_activity)
+                add_consumed_transactions([tx_hash])
             case "REDEEM":
                 redeem_activity(target_activity)
+                add_consumed_transactions([tx_hash])
             case "REWARD":
-                continue
+                add_consumed_transactions([tx_hash])
             case "CONVERSION":
                 convert_activity(target_activity)
+                add_consumed_transactions([tx_hash])
             case "MAKER_REBATE":
-                continue
+                add_consumed_transactions([tx_hash])
             case _:
                 logger.log(f"Unknown activity type: {target_activity.get('type')}", LogType.WARNING)
-                continue
+                add_consumed_transactions([tx_hash])
 
 
 def get_neg_risk_market_id(slug: str) -> str:
@@ -341,6 +291,9 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
     user_size_to_buy_usdc = round(fraction_of_target_portfolio * user_total_usdc_value, 2)
 
     logger.log(f"User size to buy usdc: {user_size_to_buy_usdc}")
+    if user_size_to_buy_usdc < 1.0:
+        logger.log(f"Order size ${user_size_to_buy_usdc} is below $1 minimum, skipping.", log_type=LogType.WARNING)
+        return False
     if user_size_to_buy_usdc > user_cash:
         logger.log("User size to buy is more than cash available, skipping.", log_type=LogType.WARNING)
         return False
@@ -356,6 +309,10 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
     while current_price <= max_price:
         user_size_to_buy = calculate_valid_size(user_size_to_buy_usdc, current_price, decimals=4)
         
+        if user_size_to_buy <= 0:
+            current_price = round(current_price + 0.01, 2)
+            continue
+
         logger.log(f"Attempting to buy {user_size_to_buy} shares at price: {current_price}")
 
         order_args = OrderArgs(
@@ -407,6 +364,9 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
     user_size_to_sell_usdc = round(fraction_of_target_portfolio * user_portfolio_usdc_value, 2)
 
     logger.log(f"User size to sell usdc: {user_size_to_sell_usdc}")
+    if user_size_to_sell_usdc < 1.0:
+        logger.log(f"Order size ${user_size_to_sell_usdc} is below $1 minimum, skipping.", log_type=LogType.WARNING)
+        return False
 
     target_price = target_activity.get("price")
     if not target_price or target_price == 0:
@@ -427,6 +387,10 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
     while current_price >= min_price:
         user_size_to_sell = calculate_valid_size(user_size_to_sell_usdc, current_price, decimals=4)
         
+        if user_size_to_sell <= 0:
+            current_price = round(current_price - 0.01, 2)
+            continue
+
         logger.log(f"Attempting to sell {user_size_to_sell} shares at price: {current_price}")
 
         order_args = OrderArgs(

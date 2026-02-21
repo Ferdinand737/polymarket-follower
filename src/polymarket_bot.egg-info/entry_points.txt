@@ -1,5 +1,0 @@
-[console_scripts]
-discord-bot = discord.discord_bot:main
-polymarket-follower = polymarket.follower:main
-ratio-calculator = utils.ratio_calculator:main
-target-stats = utils.target_stats:main

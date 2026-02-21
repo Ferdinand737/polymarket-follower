@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: polymarket-bot
-Version: 0.1.0
-Requires-Dist: matplotlib
-Requires-Dist: tabulate
-Requires-Dist: requests

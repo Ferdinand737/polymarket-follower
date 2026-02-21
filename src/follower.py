@@ -1,7 +1,7 @@
 import time
 from datetime import datetime, timedelta
 from utils.utils import *
-from polymarket.helpers import *
+from helpers import *
 from utils.logger import Logger, Whomst, LogType
 
 
@@ -50,11 +50,7 @@ def main():
 
             target_activities = fetch_activities(target_address, interval_ago_ts)
 
-            user_activities = fetch_activities(POLY_MARKET_FUNDER_ADDRESS, interval_ago_ts)
-
-            new_activities = compare_activities(target_activities, user_activities)
-
-            process_new_activities(new_activities)
+            process_new_activities(target_activities)
 
             for remaining in range(FOLLOWER_CHECK_INTERVAL_MINUTES * 60, 0, -1):
                 minutes = remaining // 60
