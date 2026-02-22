@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.utils import *
 import requests
@@ -138,6 +141,7 @@ def fetch_activities(address: str, interval_ago_ts: int = None, market: str = No
     response.raise_for_status()
     activity_data = response.json()
     return activity_data
+
 
 def process_new_activities(new_target_activities: List[Dict[str, Any]]):
     logger.log(f"Processing {len(new_target_activities)} new activities")

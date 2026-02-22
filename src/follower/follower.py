@@ -1,7 +1,11 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import time
 from datetime import datetime, timedelta
 from utils.utils import *
-from helpers import *
+from follower.helpers import *
 from utils.logger import Logger, Whomst, LogType
 
 
