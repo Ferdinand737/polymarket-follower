@@ -6,16 +6,14 @@ from utils.utils import *
 import requests
 from typing import List, Dict, Any
 from utils.logger import Logger, Whomst, LogType
-from py_clob_client import ClobClient, OrderArgs, OrderType, ApiCreds
+from py_clob_client import ClobClient, OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
-import time
-from py_builder_signing_sdk.signing.hmac import build_hmac_signature
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
-from py_builder_relayer_client.client import RelayClient, TransactionType, BuilderConfig
+from py_builder_relayer_client.client import RelayClient, BuilderConfig
+from py_builder_relayer_client.models import SafeTransaction, OperationType
 from web3 import Web3
 from decimal import Decimal, ROUND_DOWN
 from math import gcd
-
 
 
 logger = Logger(Whomst.POLYMARKET_FOLLOWER)
@@ -28,7 +26,9 @@ def calculate_valid_size(usdc_amount: float, price: float, decimals: int = 4) ->
     step = scale // gcd(price_cents, scale)
     max_size_raw = int(Decimal(str(usdc_amount)) * scale / Decimal(str(price)))
     size_raw = (max_size_raw // step) * step
-    return size_raw / scale
+    size = size_raw / scale
+    # Round to exact decimals to avoid floating-point representation issues
+    return round(size, decimals)
 
 
 client = ClobClient(host="https://clob.polymarket.com", key=PRIVATE_KEY, chain_id=137)
@@ -82,7 +82,7 @@ def sell_position(position: Dict[str, Any]):
 
         order_args = OrderArgs(
             price=current_price,
-            size=size,
+            size=f"{size:.4f}",
             side=SELL,
             token_id=token_id,
         )
@@ -94,13 +94,13 @@ def sell_position(position: Dict[str, Any]):
             return
 
         try:
-            resp = client.post_order(signed_order, OrderType.FOK)
+            resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
             if status == "MATCHED":
-                logger.log(f"FOK order filled! Sold {size} shares at {current_price}")
+                logger.log(f"FAK order filled! Sold {size} shares at {current_price}")
                 return
             else:
-                logger.log(f"FOK order not filled at {current_price}, adjusting price...")
+                logger.log(f"FAK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
             return
@@ -256,17 +256,21 @@ def convert_activity(target_activity: Dict[str, Any]):
     logger.log(f"Convert details - marketId: {market_id}, indexSet: {index_set}, amount: {user_amount_raw}")
     
     try:
-        convert_tx = {
-            "to": NEG_RISK_ADAPTER,
-            "data": Web3().eth.contract(
-                address=NEG_RISK_ADAPTER,
-                abi=[{"name": "convertPositions", "type": "function", "inputs": [{"name": "_marketId", "type": "bytes32"}, {"name": "_indexSet", "type": "uint256"}, {"name": "_amount", "type": "uint256"}], "outputs": []}]
-            ).encode_abi(abi_element_identifier="convertPositions", args=[market_id, index_set, user_amount_raw]),
-            "value": "0"
-        }
+        data = Web3().eth.contract(
+            address=NEG_RISK_ADAPTER,
+            abi=[{"name": "convertPositions", "type": "function", "inputs": [{"name": "_marketId", "type": "bytes32"}, {"name": "_indexSet", "type": "uint256"}, {"name": "_amount", "type": "uint256"}], "outputs": []}]
+        ).encode_abi(abi_element_identifier="convertPositions", args=[market_id, index_set, user_amount_raw])
+        
+        convert_tx = SafeTransaction(
+            to=NEG_RISK_ADAPTER,
+            data=data,
+            value="0",
+            operation=OperationType.Call
+        )
         logger.log("Executing convert transaction...")
         response = builder_client.execute([convert_tx], "Convert positions")
-        response.wait()
+        if hasattr(response, 'wait'):
+            response.wait()
         logger.log("Convert transaction completed successfully")
     except Exception as e:
         logger.log(str(e), LogType.ERROR)
@@ -321,7 +325,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
 
         order_args = OrderArgs(
             price=current_price,
-            size=user_size_to_buy,
+            size=f"{user_size_to_buy:.4f}",
             side=BUY,
             token_id=target_activity.get("asset"),
         )
@@ -333,13 +337,13 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             return False
 
         try:
-            resp = client.post_order(signed_order, OrderType.FOK)
+            resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
             if status == "MATCHED":
-                logger.log(f"FOK order filled! Bought {user_size_to_buy} shares at {current_price}")
+                logger.log(f"FAK order filled! Bought {user_size_to_buy} shares at {current_price}")
                 return True
             else:
-                logger.log(f"FOK order not filled at {current_price}, adjusting price...")
+                logger.log(f"FAK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
             return False
@@ -399,7 +403,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
 
         order_args = OrderArgs(
             price=current_price,
-            size=user_size_to_sell,
+            size=f"{user_size_to_sell:.4f}",
             side=SELL,
             token_id=token_id,
         )
@@ -411,13 +415,13 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
             return False
 
         try:
-            resp = client.post_order(signed_order, OrderType.FOK)
+            resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
             if status == "MATCHED":
-                logger.log(f"FOK order filled! Sold {user_size_to_sell} shares at {current_price}")
+                logger.log(f"FAK order filled! Sold {user_size_to_sell} shares at {current_price}")
                 return True
             else:
-                logger.log(f"FOK order not filled at {current_price}, adjusting price...")
+                logger.log(f"FAK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
             return False
@@ -467,17 +471,21 @@ def split_activity(target_activity: Dict[str, Any]):
     user_amount_raw = int(user_size_to_split_usdc * 10**6)
 
     try:
-        split_tx = {
-            "to": CTF,
-            "data": Web3().eth.contract(
-                address=CTF,
-                abi=[{"name": "splitPosition", "type": "function", "inputs": [{"name": "collateralToken", "type": "address"}, {"name": "parentCollectionId", "type": "bytes32"}, {"name": "conditionId", "type": "bytes32"}, {"name": "partition", "type": "uint256[]"}, {"name": "amount", "type": "uint256"}], "outputs": []}]
-            ).encode_abi(abi_element_identifier="splitPosition", args=[USDC_ADDRESS, "0x" + "00" * 32, condition_id, partition, user_amount_raw]),
-            "value": "0"
-        }
+        data = Web3().eth.contract(
+            address=CTF,
+            abi=[{"name": "splitPosition", "type": "function", "inputs": [{"name": "collateralToken", "type": "address"}, {"name": "parentCollectionId", "type": "bytes32"}, {"name": "conditionId", "type": "bytes32"}, {"name": "partition", "type": "uint256[]"}, {"name": "amount", "type": "uint256"}], "outputs": []}]
+        ).encode_abi(abi_element_identifier="splitPosition", args=[USDC_ADDRESS, "0x" + "00" * 32, condition_id, partition, user_amount_raw])
+        
+        split_tx = SafeTransaction(
+            to=CTF,
+            data=data,
+            value="0",
+            operation=OperationType.Call
+        )
         logger.log("Executing split transaction...")
         response = builder_client.execute([split_tx], "Split positions")
-        response.wait()
+        if hasattr(response, 'wait'):
+            response.wait()
         logger.log("Split transaction completed successfully")
     except Exception as e:
         logger.log(str(e), LogType.ERROR)
@@ -514,18 +522,22 @@ def merge_activity(target_activity: Dict[str, Any]):
     user_amount_raw = int(user_size_to_merge_usdc * 10**6)
 
     try:
-        merge_tx = {
-            "to": CTF,
-            "data": Web3().eth.contract(
-                address=CTF,
-                abi=[{"name": "mergePositions", "type": "function", "inputs": [{"name": "collateralToken", "type": "address"}, {"name": "parentCollectionId", "type": "bytes32"}, {"name": "conditionId", "type": "bytes32"}, {"name": "partition", "type": "uint256[]"}, {"name": "amount", "type": "uint256"}], "outputs": []}]
-            ).encode_abi(abi_element_identifier="mergePositions", args=[USDC_ADDRESS, "0x" + "00" * 32, condition_id, partition, user_amount_raw]),
-            "value": "0"
-        }
+        data = Web3().eth.contract(
+            address=CTF,
+            abi=[{"name": "mergePositions", "type": "function", "inputs": [{"name": "collateralToken", "type": "address"}, {"name": "parentCollectionId", "type": "bytes32"}, {"name": "conditionId", "type": "bytes32"}, {"name": "partition", "type": "uint256[]"}, {"name": "amount", "type": "uint256"}], "outputs": []}]
+        ).encode_abi(abi_element_identifier="mergePositions", args=[USDC_ADDRESS, "0x" + "00" * 32, condition_id, partition, user_amount_raw])
+        
+        merge_tx = SafeTransaction(
+            to=CTF,
+            data=data,
+            value="0",
+            operation=OperationType.Call
+        )
 
         logger.log("Executing merge transaction...")
         response = builder_client.execute([merge_tx], "Merge positions")
-        response.wait()
+        if hasattr(response, 'wait'):
+            response.wait()
         logger.log("Merge transaction completed successfully")
     except Exception as e:
         logger.log(str(e), LogType.ERROR)
@@ -536,18 +548,22 @@ def redeem_activity(activity: Dict[str, Any]):
     logger.log(f"Processing redeem activity: {activity.get('title')}")
 
     try:
-        redeem_tx = {
-        "to": CTF,
-        "data": Web3().eth.contract(
+        data = Web3().eth.contract(
             address=CTF,
             abi=[{"name": "redeemPositions", "type": "function", "inputs": [{"name": "collateralToken", "type": "address"}, {"name": "parentCollectionId", "type": "bytes32"}, {"name": "conditionId", "type": "bytes32"}, {"name": "indexSets", "type": "uint256[]"}], "outputs": []}]
-        ).encode_abi(abi_element_identifier="redeemPositions", args=[USDC_ADDRESS,  "0x" + "00" * 32, activity.get("conditionId"), [1,2]]),
-        "value": "0"
-    }
+        ).encode_abi(abi_element_identifier="redeemPositions", args=[USDC_ADDRESS, "0x" + "00" * 32, activity.get("conditionId"), [1, 2]])
+        
+        redeem_tx = SafeTransaction(
+            to=CTF,
+            data=data,
+            value="0",
+            operation=OperationType.Call
+        )
 
         logger.log("Executing redeem transaction...")
         response = builder_client.execute([redeem_tx], "Redeem positions")
-        response.wait()
+        if hasattr(response, 'wait'):
+            response.wait()
         logger.log("Redeem transaction completed successfully")
     except Exception as e:
         logger.log(str(e), LogType.ERROR)

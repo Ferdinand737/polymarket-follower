@@ -1,8 +1,5 @@
 {
   "address_to_follow": "0xf2f6af4f27ec2dcf4072095ab804016e14cd5817",
   "current_target_address": "0xf2f6af4f27ec2dcf4072095ab804016e14cd5817",
-  "consumed_transactions": [
-    "0xa5b239e19335147723711889f4d3862d31ad507e99432650d84adad04aaa3129",
-    "0x7932bf8128dd20051974b9481032702dfa9f31c51231f1389b182b99665a52d4"
-  ]
+  "consumed_transactions": []
 }
