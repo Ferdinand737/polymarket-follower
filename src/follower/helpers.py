@@ -68,7 +68,7 @@ def sell_all_positions():
 
 
 def sell_position(position: Dict[str, Any]):
-    logger.log(f"Selling position: ${position.get("currentValue")} {position.get("title")}")
+    logger.log(f"Selling position: ${position.get('currentValue')} {position.get('title')}")
 
     target_price = position.get("curPrice")
     size = round(position.get("size"), 4)
