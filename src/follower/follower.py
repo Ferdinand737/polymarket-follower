@@ -6,12 +6,12 @@ import time
 from datetime import datetime, timedelta
 from utils.utils import *
 from follower.helpers import *
-from utils.logger import Logger, Whomst, LogType
+from utils.logger import Logger
 
 
 def main():
 
-    logger = Logger(Whomst.POLYMARKET_FOLLOWER)
+    logger = Logger()
     
     logger.log("Starting follower...")
     

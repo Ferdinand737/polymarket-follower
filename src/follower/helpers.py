@@ -5,18 +5,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.utils import *
 import requests
 from typing import List, Dict, Any
-from utils.logger import Logger, Whomst, LogType
+from utils.logger import Logger
 from py_clob_client import ClobClient, OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 from py_builder_relayer_client.client import RelayClient, BuilderConfig
 from py_builder_relayer_client.models import SafeTransaction, OperationType
 from web3 import Web3
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from math import gcd
 
 
-logger = Logger(Whomst.POLYMARKET_FOLLOWER)
+logger = Logger()
 
 
 def calculate_valid_size(usdc_amount: float, price: float, decimals: int = 4) -> float:
@@ -204,6 +204,9 @@ def get_neg_risk_market_id(slug: str) -> str:
     logger.log(f"Fetching negRiskMarketID for slug: {slug}")
     url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
     response = requests.get(url)
+    if response.status_code == 404:
+        logger.log(f"Market slug not found: {slug}", LogType.WARNING)
+        return None
     response.raise_for_status()
     data = response.json()
     neg_risk_market_id = data["events"][0]["negRiskMarketID"]
@@ -239,6 +242,9 @@ def convert_activity(target_activity: Dict[str, Any]):
     target_usdc_size = target_activity.get("usdcSize")
     slug = target_activity.get("slug")
     market_id = get_neg_risk_market_id(slug)
+    if not market_id:
+        logger.log("Could not get market ID, skipping conversion.", LogType.WARNING)
+        return
     index_set = decode_index_set_from_tx(target_activity.get("transactionHash"))
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
     if not target_portfolio_value or target_portfolio_value == 0:
@@ -307,6 +313,8 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
         return False
 
     target_price = target_activity.get("price")
+    if target_price is not None:
+        target_price = float(target_price)
     if not target_price or target_price == 0:
         logger.log("Target price is zero or unavailable, skipping.", log_type=LogType.WARNING)
         return False
@@ -377,6 +385,8 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
         return False
 
     target_price = target_activity.get("price")
+    if target_price is not None:
+        target_price = float(target_price)
     if not target_price or target_price == 0:
         logger.log("Target price is zero or unavailable, skipping.", log_type=LogType.WARNING)
         return False
