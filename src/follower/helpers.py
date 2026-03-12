@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.utils import *
 import requests
 from typing import List, Dict, Any
-from utils.logger import Logger
+from utils.logger import Logger, LogType
 from py_clob_client import ClobClient, OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds

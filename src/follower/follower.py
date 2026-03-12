@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta
 from utils.utils import *
 from follower.helpers import *
-from utils.logger import Logger
+from utils.logger import Logger, LogType
 
 
 def main():
