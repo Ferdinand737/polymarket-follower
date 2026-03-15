@@ -82,7 +82,7 @@ def sell_position(position: Dict[str, Any]):
 
         order_args = OrderArgs(
             price=current_price,
-            size=f"{size:.4f}",
+            size=size,
             side=SELL,
             token_id=token_id,
         )
@@ -333,7 +333,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
 
         order_args = OrderArgs(
             price=current_price,
-            size=f"{user_size_to_buy:.4f}",
+            size=user_size_to_buy,
             side=BUY,
             token_id=target_activity.get("asset"),
         )
@@ -413,7 +413,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
 
         order_args = OrderArgs(
             price=current_price,
-            size=f"{user_size_to_sell:.4f}",
+            size=user_size_to_sell,
             side=SELL,
             token_id=token_id,
         )
