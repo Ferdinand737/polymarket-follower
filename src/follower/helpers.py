@@ -103,7 +103,9 @@ def sell_position(position: Dict[str, Any]):
                 logger.log(f"FAK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
-            return
+            # Continue to next price instead of giving up
+            current_price = round(current_price - 0.01, 2)
+            continue
 
         current_price = round(current_price - 0.01, 2)
 
@@ -354,7 +356,9 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
                 logger.log(f"FAK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
-            return False
+            # Continue to next price instead of giving up
+            current_price = round(current_price + 0.01, 2)
+            continue
 
         current_price = round(current_price + 0.01, 2)
 
@@ -434,7 +438,9 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
                 logger.log(f"FAK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
-            return False
+            # Continue to next price instead of giving up
+            current_price = round(current_price - 0.01, 2)
+            continue
 
         current_price = round(current_price - 0.01, 2)
 
