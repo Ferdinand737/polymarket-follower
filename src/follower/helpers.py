@@ -188,6 +188,13 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                 merge_activity(target_activity)
                 add_consumed_transactions([tx_hash])
             case "REDEEM":
+                condition_id = target_activity.get("conditionId")
+                positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
+                has_position = any(p for p in positions if p.get("conditionId") == condition_id)
+                if not has_position:
+                    logger.log(f"User has no position for conditionId {condition_id}, skipping redeem.", log_type=LogType.WARNING)
+                    add_consumed_transactions([tx_hash])
+                    continue
                 redeem_activity(target_activity)
                 add_consumed_transactions([tx_hash])
             case "REWARD":
