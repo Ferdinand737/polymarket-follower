@@ -94,13 +94,13 @@ def sell_position(position: Dict[str, Any]):
             return
 
         try:
-            resp = client.post_order(signed_order, OrderType.FAK)
+            resp = client.post_order(signed_order, OrderType.FOK)
             status = resp.get("status")
             if status == "MATCHED":
-                logger.log(f"FAK order filled! Sold {size} shares at {current_price}")
+                logger.log(f"FOK order filled! Sold {size} shares at {current_price}")
                 return
             else:
-                logger.log(f"FAK order not filled at {current_price}, adjusting price...")
+                logger.log(f"FOK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
             # Continue to next price instead of giving up
@@ -328,39 +328,52 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
         logger.log("Target price is zero or unavailable, skipping.", log_type=LogType.WARNING)
         return False
 
-    buy_price = target_price
-    user_size_to_buy = calculate_valid_size(user_size_to_buy_usdc, buy_price, decimals=4)
+    # Try target_price, then +0.01, then +0.02
+    for offset in [0, 0.01, 0.02]:
+        buy_price = min(round(target_price + offset, 2), 0.99)
+        user_size_to_buy = calculate_valid_size(user_size_to_buy_usdc, buy_price, decimals=4)
 
-    if user_size_to_buy <= 0:
-        logger.log("Calculated buy size is zero, skipping.", log_type=LogType.WARNING)
-        return False
+        if user_size_to_buy <= 0:
+            continue
 
-    logger.log(f"Placing FAK buy order: {user_size_to_buy} shares at price {buy_price}")
+        order_value = user_size_to_buy * buy_price
+        if order_value < 1.0:
+            continue
 
-    order_args = OrderArgs(
-        price=buy_price,
-        size=user_size_to_buy,
-        side=BUY,
-        token_id=target_activity.get("asset"),
-    )
+        logger.log(f"Placing FOK buy order: {user_size_to_buy} shares at price {buy_price}")
 
-    try:
-        signed_order = client.create_order(order_args)
-    except Exception as e:
-        logger.log(str(e), LogType.ERROR)
-        return False
+        order_args = OrderArgs(
+            price=buy_price,
+            size=user_size_to_buy,
+            side=BUY,
+            token_id=target_activity.get("asset"),
+        )
 
-    try:
-        resp = client.post_order(signed_order, OrderType.FAK)
-        status = resp.get("status")
-        if status == "MATCHED":
-            logger.log(f"FAK order filled! Bought {user_size_to_buy} shares at {buy_price}")
-        else:
-            logger.log(f"FAK order status: {status} at {buy_price}", LogType.WARNING)
-        return True
-    except Exception as e:
-        logger.log(str(e), LogType.ERROR)
-        return False
+        try:
+            signed_order = client.create_order(order_args)
+        except Exception as e:
+            logger.log(str(e), LogType.ERROR)
+            return False
+
+        try:
+            resp = client.post_order(signed_order, OrderType.FOK)
+            status = resp.get("status")
+            if status == "MATCHED":
+                logger.log(f"FOK order filled! Bought {user_size_to_buy} shares at {buy_price}")
+            else:
+                logger.log(f"FOK order status: {status} at {buy_price}", LogType.WARNING)
+            return True
+        except Exception as e:
+            error_msg = str(e)
+            if "no orders found" in error_msg.lower():
+                logger.log(f"No matching orders at {buy_price}, trying next price level...")
+                continue
+            else:
+                logger.log(error_msg, LogType.ERROR)
+                return False
+
+    logger.log(f"Could not fill buy order within 0.02 of target price {target_price}", LogType.WARNING)
+    return False
 
 
 def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str, Any]) -> bool:
@@ -400,39 +413,52 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
         logger.log(f"User shares ({user_share_size}) is less than needed ({needed_size}), selling all available.", log_type=LogType.WARNING)
         user_size_to_sell_usdc = user_share_size * target_price
 
-    sell_price = target_price
-    user_size_to_sell = calculate_valid_size(user_size_to_sell_usdc, sell_price, decimals=4)
+    # Try target_price, then -0.01, then -0.02
+    for offset in [0, 0.01, 0.02]:
+        sell_price = max(round(target_price - offset, 2), 0.01)
+        user_size_to_sell = calculate_valid_size(user_size_to_sell_usdc, sell_price, decimals=4)
 
-    if user_size_to_sell <= 0:
-        logger.log("Calculated sell size is zero, skipping.", log_type=LogType.WARNING)
-        return False
+        if user_size_to_sell <= 0:
+            continue
 
-    logger.log(f"Placing FAK sell order: {user_size_to_sell} shares at price {sell_price}")
+        order_value = user_size_to_sell * sell_price
+        if order_value < 1.0:
+            continue
 
-    order_args = OrderArgs(
-        price=sell_price,
-        size=user_size_to_sell,
-        side=SELL,
-        token_id=token_id,
-    )
+        logger.log(f"Placing FOK sell order: {user_size_to_sell} shares at price {sell_price}")
 
-    try:
-        signed_order = client.create_order(order_args)
-    except Exception as e:
-        logger.log(str(e), LogType.ERROR)
-        return False
+        order_args = OrderArgs(
+            price=sell_price,
+            size=user_size_to_sell,
+            side=SELL,
+            token_id=token_id,
+        )
 
-    try:
-        resp = client.post_order(signed_order, OrderType.FAK)
-        status = resp.get("status")
-        if status == "MATCHED":
-            logger.log(f"FAK order filled! Sold {user_size_to_sell} shares at {sell_price}")
-        else:
-            logger.log(f"FAK order status: {status} at {sell_price}", LogType.WARNING)
-        return True
-    except Exception as e:
-        logger.log(str(e), LogType.ERROR)
-        return False
+        try:
+            signed_order = client.create_order(order_args)
+        except Exception as e:
+            logger.log(str(e), LogType.ERROR)
+            return False
+
+        try:
+            resp = client.post_order(signed_order, OrderType.FOK)
+            status = resp.get("status")
+            if status == "MATCHED":
+                logger.log(f"FOK order filled! Sold {user_size_to_sell} shares at {sell_price}")
+            else:
+                logger.log(f"FOK order status: {status} at {sell_price}", LogType.WARNING)
+            return True
+        except Exception as e:
+            error_msg = str(e)
+            if "no orders found" in error_msg.lower():
+                logger.log(f"No matching orders at {sell_price}, trying next price level...")
+                continue
+            else:
+                logger.log(error_msg, LogType.ERROR)
+                return False
+
+    logger.log(f"Could not fill sell order within 0.02 of target price {target_price}", LogType.WARNING)
+    return False
 
 
 def split_activity(target_activity: Dict[str, Any]):
