@@ -21,13 +21,20 @@ class LogColors:
 
 class Logger:
 
+    def __init__(self, clear: bool = False):
+        log_dir = Path(__file__).parent.parent.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_file = log_dir / "polymarket_follower.log"
+        if clear:
+            # Delete existing log and start fresh
+            if self.log_file.exists():
+                self.log_file.unlink()
+            self.log_file.touch()
+
     def log(self, msg: str, log_type: LogType = LogType.INFO):
         date_and_time = datetime.now().strftime("%d-%B-%Y-%H:%M:%S").lower()
 
-        log_dir = Path(__file__).parent.parent.parent / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-        with open(log_dir / "polymarket_follower.log", "a") as f:
+        with open(self.log_file, "a") as f:
             f.write(f"[{date_and_time}] [{log_type.value}]: {msg}\n")
 
         color = getattr(LogColors, log_type.name, LogColors.RESET)

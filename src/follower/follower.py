@@ -11,7 +11,7 @@ from utils.logger import Logger, LogType
 
 def main():
 
-    logger = Logger()
+    logger = Logger(clear=True)
     
     logger.log("Starting follower...")
     

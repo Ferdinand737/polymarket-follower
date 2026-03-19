@@ -323,7 +323,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
 
     target_price = target_activity.get("price")
     if target_price is not None:
-        target_price = float(target_price)
+        target_price = round(float(target_price), 2)
     if not target_price or target_price == 0:
         logger.log("Target price is zero or unavailable, skipping.", log_type=LogType.WARNING)
         return False
@@ -387,7 +387,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
 
     target_price = target_activity.get("price")
     if target_price is not None:
-        target_price = float(target_price)
+        target_price = round(float(target_price), 2)
     if not target_price or target_price == 0:
         logger.log("Target price is zero or unavailable, skipping.", log_type=LogType.WARNING)
         return False
