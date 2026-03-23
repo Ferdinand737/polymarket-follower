@@ -400,7 +400,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             break
 
         buy_price = min(round(target_price + offset, 2), 0.99)
-        user_size_to_buy = calculate_valid_size(remaining_usdc, buy_price, decimals=4)
+        user_size_to_buy = calculate_valid_size(remaining_usdc, buy_price, decimals=2)
 
         if user_size_to_buy <= 0:
             continue
@@ -517,7 +517,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
             break
 
         sell_price = max(round(target_price - offset, 2), 0.01)
-        user_size_to_sell = calculate_valid_size(remaining_usdc, sell_price, decimals=4)
+        user_size_to_sell = calculate_valid_size(remaining_usdc, sell_price, decimals=2)
 
         if user_size_to_sell <= 0:
             continue
