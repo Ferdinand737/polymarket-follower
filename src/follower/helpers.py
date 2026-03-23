@@ -390,10 +390,17 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
         logger.log("Target price is zero or unavailable, skipping.", log_type=LogType.WARNING)
         return False
 
-    # Try target_price, then +0.01, then +0.02
+    remaining_usdc = user_size_to_buy_usdc
+    total_filled_usdc = 0.0
+
+    # Try target_price, then +0.01, then +0.02 (never more than 0.02 above target)
     for offset in [0, 0.01, 0.02]:
+        if remaining_usdc < 1.0:
+            logger.log(f"Remaining USDC ${remaining_usdc} below $1 minimum, stopping.")
+            break
+
         buy_price = min(round(target_price + offset, 2), 0.99)
-        user_size_to_buy = calculate_valid_size(user_size_to_buy_usdc, buy_price, decimals=4)
+        user_size_to_buy = calculate_valid_size(remaining_usdc, buy_price, decimals=4)
 
         if user_size_to_buy <= 0:
             continue
@@ -420,11 +427,32 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
         try:
             resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
+            # For BUY: makingAmount = USDC spent, takingAmount = shares received
+            making_amount = resp.get("makingAmount", "")
+            
             if status == "MATCHED":
-                logger.log(f"FAK order filled! Bought {user_size_to_buy} shares at {buy_price}")
+                filled_usdc = float(making_amount) / 10**6 if making_amount else order_value
+                total_filled_usdc += filled_usdc
+                remaining_usdc -= filled_usdc
+                logger.log(f"FAK order filled! Bought {user_size_to_buy} shares at {buy_price} (${filled_usdc} USDC)")
+                if remaining_usdc < 1.0:
+                    logger.log(f"Order complete. Total filled: ${total_filled_usdc}")
+                    return True
+                # Partial fill - continue to next price level
+                logger.log(f"Partial fill, ${remaining_usdc} remaining, trying next price level...")
+                continue
             else:
                 logger.log(f"FAK order status: {status} at {buy_price}", LogType.WARNING)
-            return True
+                # Check if there was a partial fill even with non-MATCHED status
+                if making_amount:
+                    filled_usdc = float(making_amount) / 10**6
+                    if filled_usdc > 0:
+                        total_filled_usdc += filled_usdc
+                        remaining_usdc -= filled_usdc
+                        logger.log(f"Partial fill of ${filled_usdc}, ${remaining_usdc} remaining")
+                        if remaining_usdc < 1.0:
+                            return True
+                continue
         except Exception as e:
             error_msg = str(e)
             if "no orders found" in error_msg.lower():
@@ -433,6 +461,10 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             else:
                 logger.log(error_msg, LogType.ERROR)
                 return False
+
+    if total_filled_usdc > 0:
+        logger.log(f"Order complete. Total filled: ${total_filled_usdc}")
+        return True
 
     logger.log(f"Could not fill buy order within 0.02 of target price {target_price}", LogType.WARNING)
     return False
@@ -475,10 +507,17 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
         logger.log(f"User shares ({user_share_size}) is less than needed ({needed_size}), selling all available.", log_type=LogType.WARNING)
         user_size_to_sell_usdc = user_share_size * target_price
 
-    # Try target_price, then -0.01, then -0.02
+    remaining_usdc = user_size_to_sell_usdc
+    total_filled_usdc = 0.0
+
+    # Try target_price, then -0.01, then -0.02 (never more than 0.02 below target)
     for offset in [0, 0.01, 0.02]:
+        if remaining_usdc < 1.0:
+            logger.log(f"Remaining USDC ${remaining_usdc} below $1 minimum, stopping.")
+            break
+
         sell_price = max(round(target_price - offset, 2), 0.01)
-        user_size_to_sell = calculate_valid_size(user_size_to_sell_usdc, sell_price, decimals=4)
+        user_size_to_sell = calculate_valid_size(remaining_usdc, sell_price, decimals=4)
 
         if user_size_to_sell <= 0:
             continue
@@ -505,11 +544,32 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
         try:
             resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
+            # For SELL: takingAmount = USDC received, makingAmount = shares given
+            taking_amount = resp.get("takingAmount", "")
+            
             if status == "MATCHED":
-                logger.log(f"FAK order filled! Sold {user_size_to_sell} shares at {sell_price}")
+                filled_usdc = float(taking_amount) / 10**6 if taking_amount else order_value
+                total_filled_usdc += filled_usdc
+                remaining_usdc -= filled_usdc
+                logger.log(f"FAK order filled! Sold {user_size_to_sell} shares at {sell_price} (${filled_usdc} USDC)")
+                if remaining_usdc < 1.0:
+                    logger.log(f"Order complete. Total filled: ${total_filled_usdc}")
+                    return True
+                # Partial fill - continue to next price level
+                logger.log(f"Partial fill, ${remaining_usdc} remaining, trying next price level...")
+                continue
             else:
                 logger.log(f"FAK order status: {status} at {sell_price}", LogType.WARNING)
-            return True
+                # Check if there was a partial fill even with non-MATCHED status
+                if taking_amount:
+                    filled_usdc = float(taking_amount) / 10**6
+                    if filled_usdc > 0:
+                        total_filled_usdc += filled_usdc
+                        remaining_usdc -= filled_usdc
+                        logger.log(f"Partial fill of ${filled_usdc}, ${remaining_usdc} remaining")
+                        if remaining_usdc < 1.0:
+                            return True
+                continue
         except Exception as e:
             error_msg = str(e)
             if "no orders found" in error_msg.lower():
@@ -518,6 +578,10 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
             else:
                 logger.log(error_msg, LogType.ERROR)
                 return False
+
+    if total_filled_usdc > 0:
+        logger.log(f"Order complete. Total filled: ${total_filled_usdc}")
+        return True
 
     logger.log(f"Could not fill sell order within 0.02 of target price {target_price}", LogType.WARNING)
     return False
