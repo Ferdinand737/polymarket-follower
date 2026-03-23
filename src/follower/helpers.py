@@ -125,13 +125,13 @@ def sell_position(position: Dict[str, Any]):
             return
 
         try:
-            resp = client.post_order(signed_order, OrderType.FOK)
+            resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
             if status == "MATCHED":
-                logger.log(f"FOK order filled! Sold {size} shares at {current_price}")
+                logger.log(f"FAK order filled! Sold {size} shares at {current_price}")
                 return
             else:
-                logger.log(f"FOK order not filled at {current_price}, adjusting price...")
+                logger.log(f"FAK order not filled at {current_price}, adjusting price...")
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
             # Continue to next price instead of giving up
@@ -402,7 +402,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
         if order_value < 1.0:
             continue
 
-        logger.log(f"Placing FOK buy order: {user_size_to_buy} shares at price {buy_price}")
+        logger.log(f"Placing FAK buy order: {user_size_to_buy} shares at price {buy_price}")
 
         order_args = OrderArgs(
             price=buy_price,
@@ -418,12 +418,12 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             return False
 
         try:
-            resp = client.post_order(signed_order, OrderType.FOK)
+            resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
             if status == "MATCHED":
-                logger.log(f"FOK order filled! Bought {user_size_to_buy} shares at {buy_price}")
+                logger.log(f"FAK order filled! Bought {user_size_to_buy} shares at {buy_price}")
             else:
-                logger.log(f"FOK order status: {status} at {buy_price}", LogType.WARNING)
+                logger.log(f"FAK order status: {status} at {buy_price}", LogType.WARNING)
             return True
         except Exception as e:
             error_msg = str(e)
@@ -487,7 +487,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
         if order_value < 1.0:
             continue
 
-        logger.log(f"Placing FOK sell order: {user_size_to_sell} shares at price {sell_price}")
+        logger.log(f"Placing FAK sell order: {user_size_to_sell} shares at price {sell_price}")
 
         order_args = OrderArgs(
             price=sell_price,
@@ -503,12 +503,12 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
             return False
 
         try:
-            resp = client.post_order(signed_order, OrderType.FOK)
+            resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
             if status == "MATCHED":
-                logger.log(f"FOK order filled! Sold {user_size_to_sell} shares at {sell_price}")
+                logger.log(f"FAK order filled! Sold {user_size_to_sell} shares at {sell_price}")
             else:
-                logger.log(f"FOK order status: {status} at {sell_price}", LogType.WARNING)
+                logger.log(f"FAK order status: {status} at {sell_price}", LogType.WARNING)
             return True
         except Exception as e:
             error_msg = str(e)
