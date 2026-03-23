@@ -4,8 +4,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.utils import *
 import requests
+from requests.exceptions import RequestException
 from typing import List, Dict, Any
 from utils.logger import Logger, LogType
+import time
+
+
+def is_transient_error(error: Exception) -> bool:
+    """Check if an error is transient and worth retrying."""
+    if isinstance(error, requests.exceptions.HTTPError):
+        status_code = error.response.status_code if error.response else 0
+        return status_code in (502, 503, 504, 429)
+    if isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    return False
+
+
+def with_retry(func, max_retries: int = 3, base_delay: float = 1.0, backoff_factor: float = 2.0):
+    """Wrap a function with retry logic for transient errors."""
+    def wrapper(*args, **kwargs):
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                if is_transient_error(e) and attempt < max_retries - 1:
+                    delay = base_delay * (backoff_factor ** attempt)
+                    logger.log(f"Transient error on attempt {attempt + 1}/{max_retries}, retrying in {delay}s: {e}", LogType.WARNING)
+                    time.sleep(delay)
+                else:
+                    raise
+        raise last_error
+    return wrapper
 from py_clob_client import ClobClient, OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
@@ -119,10 +150,17 @@ def fetch_positions(address: str):
     params = {
         "user": address
     }
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    positions_data = response.json()
-    return positions_data
+    
+    def _fetch():
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    
+    try:
+        return with_retry(_fetch, max_retries=3, base_delay=1.0)()
+    except Exception as e:
+        logger.log(f"Failed to fetch positions after retries: {e}", LogType.ERROR)
+        raise
 
 
 def fetch_activities(address: str, interval_ago_ts: int = None, market: str = None, limit: int = 10):
@@ -139,10 +177,17 @@ def fetch_activities(address: str, interval_ago_ts: int = None, market: str = No
         params["start"] = interval_ago_ts
     if market:
         params["market"] = market
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    activity_data = response.json()
-    return activity_data
+    
+    def _fetch():
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    
+    try:
+        return with_retry(_fetch, max_retries=3, base_delay=1.0)()
+    except Exception as e:
+        logger.log(f"Failed to fetch activities after retries: {e}", LogType.ERROR)
+        raise
 
 
 def process_new_activities(new_target_activities: List[Dict[str, Any]]):
@@ -212,15 +257,25 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
 def get_neg_risk_market_id(slug: str) -> str:
     logger.log(f"Fetching negRiskMarketID for slug: {slug}")
     url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
-    response = requests.get(url)
-    if response.status_code == 404:
-        logger.log(f"Market slug not found: {slug}", LogType.WARNING)
+    
+    def _fetch():
+        response = requests.get(url, timeout=30)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+    
+    try:
+        data = with_retry(_fetch, max_retries=3, base_delay=1.0)()
+        if data is None:
+            logger.log(f"Market slug not found: {slug}", LogType.WARNING)
+            return None
+        neg_risk_market_id = data["events"][0]["negRiskMarketID"]
+        logger.log(f"Found negRiskMarketID: {neg_risk_market_id}")
+        return neg_risk_market_id
+    except Exception as e:
+        logger.log(f"Failed to fetch market ID after retries: {e}", LogType.ERROR)
         return None
-    response.raise_for_status()
-    data = response.json()
-    neg_risk_market_id = data["events"][0]["negRiskMarketID"]
-    logger.log(f"Found negRiskMarketID: {neg_risk_market_id}")
-    return neg_risk_market_id
 
 
 def decode_index_set_from_tx(tx_hash: str) -> int:
@@ -233,15 +288,22 @@ def decode_index_set_from_tx(tx_hash: str) -> int:
         "txhash": tx_hash,
         "apikey": ETHERSCAN_API_KEY
     }
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    tx_data = response.json()
     
-    input_data = tx_data["result"]["input"]
-    index_set_hex = input_data[74:138]
-    index_set = int(index_set_hex, 16)
-    logger.log(f"Decoded indexSet: {index_set}")
-    return index_set
+    def _fetch():
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    
+    try:
+        tx_data = with_retry(_fetch, max_retries=3, base_delay=2.0)()
+        input_data = tx_data["result"]["input"]
+        index_set_hex = input_data[74:138]
+        index_set = int(index_set_hex, 16)
+        logger.log(f"Decoded indexSet: {index_set}")
+        return index_set
+    except Exception as e:
+        logger.log(f"Failed to decode tx after retries: {e}", LogType.ERROR)
+        raise
 
 
 def convert_activity(target_activity: Dict[str, Any]):
@@ -611,11 +673,19 @@ def get_on_chain_usdc_balance(address: str):
         "tag": "latest",
         "apikey": ETHERSCAN_API_KEY
     }
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    balance_data = response.json()
-    balance = int(balance_data.get("result", 0)) / 10**6
-    return balance
+    
+    def _fetch():
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    
+    try:
+        balance_data = with_retry(_fetch, max_retries=3, base_delay=2.0)()
+        balance = int(balance_data.get("result", 0)) / 10**6
+        return balance
+    except Exception as e:
+        logger.log(f"Failed to fetch USDC balance after retries: {e}", LogType.ERROR)
+        raise
     
     
 
@@ -625,10 +695,18 @@ def get_portfolio_usdc_value(address: str):
     params = {
         "user": address
     }
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    value_data = response.json()[0]
-    return value_data.get("value")
+    
+    def _fetch():
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    
+    try:
+        value_data = with_retry(_fetch, max_retries=3, base_delay=1.0)()[0]
+        return value_data.get("value")
+    except Exception as e:
+        logger.log(f"Failed to fetch portfolio value after retries: {e}", LogType.ERROR)
+        raise
 
 
 

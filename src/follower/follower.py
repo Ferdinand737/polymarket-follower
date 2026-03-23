@@ -73,7 +73,9 @@ def main():
             logger.log(str(e), LogType.ERROR)
             save_current_target_address(current_target_address)
             logger.log(f"Saved current target address: {current_target_address}")
-            break
+            logger.log(f"Sleeping for {FOLLOWER_CHECK_INTERVAL_MINUTES} minutes before retry...")
+            time.sleep(FOLLOWER_CHECK_INTERVAL_MINUTES * 60)
+            continue
             
 
 
