@@ -19,23 +19,6 @@ def main():
     current_target_address = get_current_target_address()
     logger.log(f"Loaded current target from file: {current_target_address}")
     
-    # Catch-up scan: Process any missed trades from the last hour on startup
-    # This ensures we don't miss trades that happened while the follower was offline
-    logger.log("Performing catch-up scan for missed trades...")
-    try:
-        target_address = get_follow_address()
-        if target_address == current_target_address:
-            # Look back 24 hours to catch any missed trades (conservative for startup)
-            catchup_ts = int((datetime.now() - timedelta(hours=24)).timestamp())
-            catchup_activities = fetch_activities(target_address, catchup_ts)
-            if catchup_activities:
-                logger.log(f"Catch-up: Found {len(catchup_activities)} activities from last hour")
-                process_new_activities(catchup_activities)
-            else:
-                logger.log("Catch-up: No missed activities found")
-    except Exception as e:
-        logger.log(f"Catch-up scan failed: {e}", LogType.WARNING)
-    
     while True:
         try:
             logger.log(f"Current target address: {current_target_address}")
