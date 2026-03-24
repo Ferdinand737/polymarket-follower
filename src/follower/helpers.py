@@ -453,7 +453,8 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             logger.log(f"Remaining USDC ${remaining_usdc} below $1 minimum, stopping.")
             break
 
-        buy_price = min(round(target_price + offset, 2), 0.99)
+        # Cap at 1.00 (not 0.99) to allow buying at maximum price when target is at 1.0
+        buy_price = min(round(target_price + offset, 2), 1.00)
         user_size_to_buy = calculate_valid_size(remaining_usdc, buy_price, decimals=2)
 
         if user_size_to_buy <= 0:
