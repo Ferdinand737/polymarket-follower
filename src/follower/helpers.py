@@ -4,10 +4,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.utils import *
 import requests
-from requests.exceptions import RequestException
+from requests.exceptions import
 from typing import List, Dict, Any
 from utils.logger import Logger, LogType
 import time
+
+    
+from py_clob_client import ClobClient, OrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY, SELL
+from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
+from py_builder_relayer_client.client import RelayClient, BuilderConfig
+from py_builder_relayer_client.models import SafeTransaction, OperationType
+from web3 import Web3
+from decimal import Decimal
+from math import gcd
+
+
+logger = Logger()
+
 
 
 def is_transient_error(error: Exception) -> bool:
@@ -37,17 +51,7 @@ def with_retry(func, max_retries: int = 3, base_delay: float = 1.0, backoff_fact
                     raise
         raise last_error
     return wrapper
-from py_clob_client import ClobClient, OrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY, SELL
-from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
-from py_builder_relayer_client.client import RelayClient, BuilderConfig
-from py_builder_relayer_client.models import SafeTransaction, OperationType
-from web3 import Web3
-from decimal import Decimal
-from math import gcd
 
-
-logger = Logger()
 
 
 def calculate_valid_size(usdc_amount: float, price: float, decimals: int = 4) -> float:
@@ -353,6 +357,31 @@ def convert_activity(target_activity: Dict[str, Any]):
         logger.log(str(e), LogType.ERROR)
         return
 
+def get_position_value(conditionId: str, address: str) -> float:
+
+    logger.log(f"Fetching positions for {address}")
+    url = "https://data-api.polymarket.com/positions"
+    params = {
+        "user": address,
+        "market": [conditionId]
+    }
+    
+    def _fetch():
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+
+        if not response.json():
+            return 0
+        
+        return response.json()[0].get("currentValue", 0)
+    
+    try:
+        return with_retry(_fetch, max_retries=3, base_delay=1.0)()
+    except Exception as e:
+        logger.log(f"Failed to fetch positions after retries: {e}", LogType.ERROR)
+        raise
+
+
 def buy_activity(target_activity: Dict[str, Any]) -> bool:
     logger.log(f"Buying activity: {target_activity.get('title')}")
 
@@ -376,9 +405,35 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
     user_size_to_buy_usdc = round(fraction_of_target_portfolio * user_total_usdc_value, 2)
 
     logger.log(f"User size to buy usdc: {user_size_to_buy_usdc}")
+
     if user_size_to_buy_usdc < 1.0:
-        logger.log(f"Order size ${user_size_to_buy_usdc} is below $1 minimum, skipping.", log_type=LogType.WARNING)
-        return False
+        logger.log("User size to buy USDC is less than $1, calculating position-based buy size.")
+
+        current_target_position_value = get_position_value(target_activity.get("conditionId"), target_activity.get("proxyWallet"))
+
+        target_position_portfolio_fraction = current_target_position_value / target_portfolio_value
+        logger.log(f"Target position portfolio fraction: {target_position_portfolio_fraction}")
+
+        current_user_position_value = get_position_value(target_activity.get("conditionId"), POLY_MARKET_FUNDER_ADDRESS)
+
+        user_position_portfolio_fraction = current_user_position_value / user_total_usdc_value
+        logger.log(f"User position portfolio fraction: {user_position_portfolio_fraction}")
+
+        if user_position_portfolio_fraction >= target_position_portfolio_fraction:
+            logger.log("User position portfolio fraction is greater than or equal to target position portfolio fraction, skipping.", log_type=LogType.WARNING)
+            return False
+
+        user_usdc_needed = target_position_portfolio_fraction * user_total_usdc_value - current_user_position_value
+        logger.log(f"User USDC needed to match target fraction: {user_usdc_needed}")
+
+        if user_usdc_needed < 1:
+            logger.log("Buy size would be less than $1, skipping.", log_type=LogType.WARNING)
+            return False
+
+        user_size_to_buy_usdc = round(user_usdc_needed, 2)
+        logger.log(f"Updated user size to buy USDC: {user_size_to_buy_usdc}")
+
+
     if user_size_to_buy_usdc > user_cash:
         logger.log("User size to buy is more than cash available, skipping.", log_type=LogType.WARNING)
         return False
@@ -393,7 +448,6 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
     remaining_usdc = user_size_to_buy_usdc
     total_filled_usdc = 0.0
 
-    # Try target_price, then +0.01, then +0.02 (never more than 0.02 above target)
     for offset in [0, 0.01, 0.02]:
         if remaining_usdc < 1.0:
             logger.log(f"Remaining USDC ${remaining_usdc} below $1 minimum, stopping.")
@@ -427,7 +481,6 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
         try:
             resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
-            # For BUY: makingAmount = USDC spent, takingAmount = shares received
             making_amount = resp.get("makingAmount", "")
             
             if status == "MATCHED":
@@ -438,12 +491,10 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
                 if remaining_usdc < 1.0:
                     logger.log(f"Order complete. Total filled: ${total_filled_usdc}")
                     return True
-                # Partial fill - continue to next price level
                 logger.log(f"Partial fill, ${remaining_usdc} remaining, trying next price level...")
                 continue
             else:
                 logger.log(f"FAK order status: {status} at {buy_price}", LogType.WARNING)
-                # Check if there was a partial fill even with non-MATCHED status
                 if making_amount:
                     filled_usdc = float(making_amount) / 10**6
                     if filled_usdc > 0:
