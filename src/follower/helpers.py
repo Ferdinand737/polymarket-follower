@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.utils import *
 import requests
-from requests.exceptions import
+from requests.exceptions import RequestException
 from typing import List, Dict, Any
 from utils.logger import Logger, LogType
 import time
