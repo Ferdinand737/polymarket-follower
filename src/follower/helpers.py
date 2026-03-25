@@ -642,7 +642,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
                 logger.log(f"FAK order status: {status} at {sell_price}", LogType.WARNING)
                 # Check if there was a partial fill even with non-MATCHED status
                 if taking_amount:
-                    filled_usdc = float(taking_amount) / 10**6
+                    filled_usdc = float(taking_amount)
                     if filled_usdc > 0:
                         total_filled_usdc += filled_usdc
                         remaining_usdc -= filled_usdc
