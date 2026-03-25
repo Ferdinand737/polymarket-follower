@@ -506,7 +506,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             making_amount = resp.get("makingAmount", "")
             
             if status == "MATCHED":
-                filled_usdc = float(making_amount) / 10**6 if making_amount else order_value
+                filled_usdc = float(making_amount) if making_amount else order_value
                 total_filled_usdc += filled_usdc
                 remaining_usdc -= filled_usdc
                 logger.log(f"FAK order filled! Bought {user_size_to_buy} shares at {buy_price} (${filled_usdc} USDC)")
@@ -518,7 +518,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             else:
                 logger.log(f"FAK order status: {status} at {buy_price}", LogType.WARNING)
                 if making_amount:
-                    filled_usdc = float(making_amount) / 10**6
+                    filled_usdc = float(making_amount)
                     if filled_usdc > 0:
                         total_filled_usdc += filled_usdc
                         remaining_usdc -= filled_usdc
@@ -628,7 +628,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
             taking_amount = resp.get("takingAmount", "")
             
             if status == "MATCHED":
-                filled_usdc = float(taking_amount) / 10**6 if taking_amount else order_value
+                filled_usdc = float(taking_amount) if taking_amount else order_value
                 total_filled_usdc += filled_usdc
                 remaining_usdc -= filled_usdc
                 logger.log(f"FAK order filled! Sold {user_size_to_sell} shares at {sell_price} (${filled_usdc} USDC)")
