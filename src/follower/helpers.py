@@ -55,6 +55,18 @@ def with_retry(func, max_retries: int = 3, base_delay: float = 1.0, backoff_fact
 
 
 def calculate_valid_size(usdc_amount: float, price: float, decimals: int = 4) -> float:
+    """
+    Calculate a valid order size that ensures:
+    - Maker amount (size * price) has max 2 decimals
+    - Taker amount (size) has max 4 decimals
+    
+    The Polymarket API requires:
+    - maker_amount = size * price * 10^6 (must result in integer with max 2 decimal precision)
+    - taker_amount = size * 10^6 (must result in integer with max 4 decimal precision)
+    """
+    if usdc_amount <= 0 or price <= 0:
+        return 0.0
+    
     price_cents = int(round(price * 100))
     scale = 10 ** decimals
     # size_raw * price_cents must be divisible by scale for maker amount to have <= 2 decimals
@@ -252,6 +264,9 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                 convert_activity(target_activity)
                 add_consumed_transactions([tx_hash])
             case "MAKER_REBATE":
+                add_consumed_transactions([tx_hash])
+            case "YIELD":
+                # Yield activities are passive rewards, just mark as consumed
                 add_consumed_transactions([tx_hash])
             case _:
                 logger.log(f"Unknown activity type: {target_activity.get('type')}", LogType.WARNING)
@@ -459,7 +474,14 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
         if user_size_to_buy <= 0:
             continue
 
+        # Ensure size and maker amount have valid precision
+        # Format to string to avoid floating-point representation issues
+        user_size_to_buy = float(f"{user_size_to_buy:.2f}")
+        
         order_value = user_size_to_buy * buy_price
+        # Verify maker amount has ≤2 decimals
+        order_value = round(order_value, 2)
+        
         if order_value < 1.0:
             continue
 
@@ -573,7 +595,14 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
         if user_size_to_sell <= 0:
             continue
 
+        # Ensure size and maker amount have valid precision
+        # Format to string to avoid floating-point representation issues
+        user_size_to_sell = float(f"{user_size_to_sell:.2f}")
+        
         order_value = user_size_to_sell * sell_price
+        # Verify maker amount has ≤2 decimals
+        order_value = round(order_value, 2)
+        
         if order_value < 1.0:
             continue
 
