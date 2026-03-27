@@ -238,9 +238,9 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                 elif side == "SELL":
                     success = sell_activity(target_activity, user_token_position)
                 
-                if success:
-                    add_consumed_transactions([tx_hash])
-                # If not successful (too small), we skip it - don't mark consumed, will be ignored on next cycle
+                # Always mark as consumed to prevent double buying
+                # The position-based fallback already handles catching up to target allocation
+                add_consumed_transactions([tx_hash])
                 
             case "SPLIT":
                 split_activity(target_activity)
