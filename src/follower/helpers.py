@@ -211,9 +211,10 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
     
     consumed = get_consumed_transactions()
     
-    # First, aggregate trades by conditionId to handle multiple small trades
+    # Aggregate BUY trades by conditionId to handle multiple small trades
     # This prevents position-based fallback from triggering multiple times
-    aggregated_trades = {}  # conditionId -> list of activities
+    aggregated_buys = {}  # conditionId -> {total_usdc, first_activity, all_hashes}
+    processed_condition_ids = set()  # Track which conditionIds we've already processed
     
     for target_activity in new_target_activities:
         tx_hash = target_activity.get("transactionHash")
@@ -222,11 +223,19 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
         
         if target_activity.get("type") == "TRADE" and target_activity.get("side") == "BUY":
             condition_id = target_activity.get("conditionId")
-            if condition_id not in aggregated_trades:
-                aggregated_trades[condition_id] = []
-            aggregated_trades[condition_id].append(target_activity)
+            usdc_size = float(target_activity.get("usdcSize", 0))
+            
+            if condition_id not in aggregated_buys:
+                aggregated_buys[condition_id] = {
+                    "total_usdc": 0,
+                    "first_activity": target_activity,
+                    "all_hashes": []
+                }
+            
+            aggregated_buys[condition_id]["total_usdc"] += usdc_size
+            aggregated_buys[condition_id]["all_hashes"].append(tx_hash)
     
-    # Process non-TRADE activities and SELLs directly
+    # Now process all activities
     for target_activity in new_target_activities:
         tx_hash = target_activity.get("transactionHash")
         if tx_hash in consumed:
@@ -238,18 +247,29 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                 side = target_activity.get("side")
                 condition_id = target_activity.get("conditionId")
                 
-                # For BUYs: only process the first trade for each conditionId
-                # The position-based fallback will handle catching up to the correct allocation
-                if side == "BUY":
-                    if condition_id in aggregated_trades:
-                        activities_for_condition = aggregated_trades[condition_id]
-                        # Only process if this is the first activity for this conditionId
-                        if target_activity != activities_for_condition[0]:
-                            logger.log(f"Skipping duplicate BUY for conditionId {condition_id} (will be caught by position-based fallback)", log_type=LogType.WARNING)
-                            add_consumed_transactions([tx_hash])
-                            continue
-                        # Remove from aggregated_trades so subsequent trades are skipped
-                        del aggregated_trades[condition_id]
+                # For BUYs: check if this is part of an aggregated trade
+                if side == "BUY" and condition_id in aggregated_buys:
+                    agg = aggregated_buys[condition_id]
+                    
+                    # Check if we already processed this conditionId
+                    if condition_id in processed_condition_ids:
+                        # Skip - already processed as aggregated trade
+                        add_consumed_transactions([tx_hash])
+                        continue
+                    
+                    # Mark as processed
+                    processed_condition_ids.add(condition_id)
+                    
+                    # Use the aggregated data
+                    activity_to_process = dict(agg["first_activity"])
+                    activity_to_process["usdcSize"] = agg["total_usdc"]
+                    logger.log(f"Aggregated {len(agg['all_hashes'])} trades for conditionId {condition_id}, total: ${agg['total_usdc']:.2f}")
+                    
+                    # Process the aggregated trade
+                    success = buy_activity(activity_to_process)
+                    # Mark all hashes as consumed
+                    add_consumed_transactions(agg["all_hashes"])
+                    continue
                 
                 # Get user position for SELL activities
                 user_token_position = None
@@ -261,15 +281,11 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                         add_consumed_transactions([tx_hash])
                         continue
                 
-                # Process the trade
+                # Process SELL trades normally
                 success = False
-                if side == "BUY":
-                    success = buy_activity(target_activity)
-                elif side == "SELL":
+                if side == "SELL":
                     success = sell_activity(target_activity, user_token_position)
-                
-                # Always mark as consumed to prevent double buying
-                add_consumed_transactions([tx_hash])
+                    add_consumed_transactions([tx_hash])
                 
             case "SPLIT":
                 split_activity(target_activity)
