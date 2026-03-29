@@ -25,11 +25,12 @@ class Logger:
         log_dir = Path(__file__).parent.parent.parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = log_dir / "polymarket_follower.log"
-        if clear:
-            # Delete existing log and start fresh
-            if self.log_file.exists():
-                self.log_file.unlink()
-            self.log_file.touch()
+        # Never clear logs automatically - this can happen when a duplicate
+        # process starts and wipes out evidence of the first process's work
+        # if clear:
+        #     if self.log_file.exists():
+        #         self.log_file.unlink()
+        #     self.log_file.touch()
 
     def log(self, msg: str, log_type: LogType = LogType.INFO):
         date_and_time = datetime.now().strftime("%d-%B-%Y-%H:%M:%S").lower()

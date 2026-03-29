@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -8,10 +9,44 @@ from utils.utils import *
 from follower.helpers import *
 from utils.logger import Logger, LogType
 
+PID_FILE = Path(__file__).parent.parent / "follower.pid"
+
+
+def check_single_instance():
+    """Ensure only one follower process is running."""
+    if PID_FILE.exists():
+        try:
+            with open(PID_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+            # Check if process is still running
+            os.kill(old_pid, 0)  # Raises OSError if process doesn't exist
+            print(f"Follower already running with PID {old_pid}. Exiting.")
+            sys.exit(1)
+        except (ValueError, OSError):
+            # PID file exists but process is dead, remove it
+            PID_FILE.unlink()
+    
+    # Write our PID
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+
+def cleanup_pid():
+    """Remove PID file on exit."""
+    if PID_FILE.exists():
+        try:
+            with open(PID_FILE, 'r') as f:
+                stored_pid = int(f.read().strip())
+            if stored_pid == os.getpid():
+                PID_FILE.unlink()
+        except (ValueError, OSError):
+            pass
+
 
 def main():
-
-    logger = Logger(clear=True)
+    check_single_instance()
+    
+    logger = Logger()
     
     logger.log("Starting follower...")
     
@@ -68,6 +103,7 @@ def main():
             logger.log("Follower stopped by user.", LogType.INFO)
             save_current_target_address(current_target_address)
             logger.log(f"Saved current target address: {current_target_address}")
+            cleanup_pid()
             break
         except Exception as e:
             logger.log(str(e), LogType.ERROR)
