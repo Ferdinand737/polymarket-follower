@@ -13,6 +13,9 @@ from datetime import datetime
 from follower.helpers import get_portfolio_usdc_value, get_on_chain_usdc_balance, POLY_MARKET_FUNDER_ADDRESS
 from utils.utils import get_follow_address
 
+# Path to log file
+LOG_FILE_PATH = Path(__file__).resolve().parent.parent.parent / "logs" / "polymarket_follower.log"
+
 # Minimum USDC for a trade to be considered "big" and worth monitoring
 MIN_TRADE_SIZE_USDC = 100.0
 
@@ -38,6 +41,27 @@ def fetch_positions(address: str):
     response = requests.get(url, params=params, timeout=30)
     response.raise_for_status()
     return response.json()
+
+
+def fetch_log_entries(search_terms: list, context_lines: int = 3):
+    """Fetch log entries matching any of the search terms with context."""
+    if not LOG_FILE_PATH.exists():
+        return []
+    
+    results = []
+    with open(LOG_FILE_PATH, 'r') as f:
+        lines = f.readlines()
+    
+    for i, line in enumerate(lines):
+        for term in search_terms:
+            if term.lower() in line.lower():
+                # Get context lines around the match
+                start = max(0, i - context_lines)
+                end = min(len(lines), i + context_lines + 1)
+                results.append((i + 1, lines[start:end]))  # 1-indexed line number
+                break
+    
+    return results
 
 
 def calculate_min_target_order():
@@ -66,9 +90,14 @@ def main():
         target_activities = fetch_activities(target_address, limit=30)
         follower_activities = fetch_activities(POLY_MARKET_FUNDER_ADDRESS, limit=30)
         
-        # Fetch follower positions to check if we can sell
+        # Fetch positions for both users
         follower_positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
+        target_positions = fetch_positions(target_address)
         follower_condition_ids_with_position = {p.get('conditionId') for p in follower_positions if float(p.get('totalUsdc', 0)) > 0}
+
+        # Calculate portfolio values for allocation comparison
+        user_portfolio_value = get_portfolio_usdc_value(POLY_MARKET_FUNDER_ADDRESS) + get_on_chain_usdc_balance(POLY_MARKET_FUNDER_ADDRESS)
+        target_portfolio_value = get_portfolio_usdc_value(target_address)
         
         # Filter for trades
         target_trades = [a for a in target_activities if a.get('type') == 'TRADE']
@@ -134,9 +163,76 @@ def main():
             print(f"  ⚠️  MISSED {len(missed)} trades above threshold!")
             for t in missed[:5]:
                 print(f"    ${t.get('usdcSize',0):>8.2f} | {t.get('title','')[:40]}")
+            
+            # Fetch relevant log entries for missed trades
+            missed_titles = [t.get('title', '')[:40] for t in missed[:5]]
+            log_entries = fetch_log_entries(missed_titles)
+            if log_entries:
+                print(f"\n  Relevant log entries:")
+                for line_num, lines in log_entries[:5]:
+                    for line in lines:
+                        print(f"    {line.rstrip()}")
+                    print()
         else:
             print("  ✓ No missed trades - all above-threshold BUYS have been copied")
-        
+
+        # Compare allocation percentages for shared positions
+        print(f"\n--- Allocation Comparison ---")
+
+      
+        # Build dicts of positions by conditionId
+        target_pos_by_cid = {p.get('conditionId'): p for p in target_positions if float(p.get('currentValue', 0)) > 0}
+        follower_pos_by_cid = {p.get('conditionId'): p for p in follower_positions if float(p.get('currentValue', 0)) > 0}
+
+
+        # Find shared positions
+        shared_cids = set(target_pos_by_cid.keys()) & set(follower_pos_by_cid.keys())
+
+        allocation_issues = []
+        for cid in shared_cids:
+            target_pos = target_pos_by_cid[cid]
+            follower_pos = follower_pos_by_cid[cid]
+
+            target_usdc = float(target_pos.get('currentValue', 0))
+            follower_usdc = float(follower_pos.get('currentValue', 0))
+
+            # Calculate allocation percentages
+            target_alloc_pct = (target_usdc / target_portfolio_value) * 100 if target_portfolio_value > 0 else 0
+            follower_alloc_pct = (follower_usdc / user_portfolio_value) * 100 if user_portfolio_value > 0 else 0
+
+            alloc_diff = abs(target_alloc_pct - follower_alloc_pct)
+
+            if alloc_diff > 2.0:
+                allocation_issues.append({
+                    'conditionId': cid,
+                    'title': target_pos.get('title', 'Unknown'),
+                    'target_usdc': target_usdc,
+                    'follower_usdc': follower_usdc,
+                    'target_alloc': target_alloc_pct,
+                    'follower_alloc': follower_alloc_pct,
+                    'diff': alloc_diff
+                })
+
+        if allocation_issues:
+            print(f"  ⚠️  {len(allocation_issues)} positions with >2% allocation difference:")
+            for issue in allocation_issues[:10]:
+                print(f"    {issue['title'][:35]}")
+                print(f"      Target: ${issue['target_usdc']:,.0f} ({issue['target_alloc']:.1f}%) | "
+                      f"Follower: ${issue['follower_usdc']:,.0f} ({issue['follower_alloc']:.1f}%) | "
+                      f"Diff: {issue['diff']:.1f}%")
+            
+            # Fetch relevant log entries for allocation issues
+            issue_titles = [issue['title'] for issue in allocation_issues[:5]]
+            log_entries = fetch_log_entries(issue_titles)
+            if log_entries:
+                print(f"\n  Relevant log entries:")
+                for line_num, lines in log_entries[:5]:
+                    for line in lines:
+                        print(f"    {line.rstrip()}")
+                    print()
+        else:
+            print(f"  ✓ All {len(shared_cids)} shared positions within 2% allocation tolerance")
+
         print(f"\n{'='*80}\n")
         
     except Exception as e:
