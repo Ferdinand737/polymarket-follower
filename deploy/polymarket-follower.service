@@ -1,0 +1,14 @@
+[Unit]
+Description=Polymarket Follower Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/alan/.openclaw/workspace/polymarket-follower/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/alan/.openclaw/workspace/polymarket-follower/src/venv/bin/python -m follower.follower
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=default.target
