@@ -211,6 +211,22 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
     
     consumed = get_consumed_transactions()
     
+    # First, aggregate trades by conditionId to handle multiple small trades
+    # This prevents position-based fallback from triggering multiple times
+    aggregated_trades = {}  # conditionId -> list of activities
+    
+    for target_activity in new_target_activities:
+        tx_hash = target_activity.get("transactionHash")
+        if tx_hash in consumed:
+            continue
+        
+        if target_activity.get("type") == "TRADE" and target_activity.get("side") == "BUY":
+            condition_id = target_activity.get("conditionId")
+            if condition_id not in aggregated_trades:
+                aggregated_trades[condition_id] = []
+            aggregated_trades[condition_id].append(target_activity)
+    
+    # Process non-TRADE activities and SELLs directly
     for target_activity in new_target_activities:
         tx_hash = target_activity.get("transactionHash")
         if tx_hash in consumed:
@@ -220,6 +236,20 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
             case "TRADE":
                 asset = target_activity.get("asset")
                 side = target_activity.get("side")
+                condition_id = target_activity.get("conditionId")
+                
+                # For BUYs: only process the first trade for each conditionId
+                # The position-based fallback will handle catching up to the correct allocation
+                if side == "BUY":
+                    if condition_id in aggregated_trades:
+                        activities_for_condition = aggregated_trades[condition_id]
+                        # Only process if this is the first activity for this conditionId
+                        if target_activity != activities_for_condition[0]:
+                            logger.log(f"Skipping duplicate BUY for conditionId {condition_id} (will be caught by position-based fallback)", log_type=LogType.WARNING)
+                            add_consumed_transactions([tx_hash])
+                            continue
+                        # Remove from aggregated_trades so subsequent trades are skipped
+                        del aggregated_trades[condition_id]
                 
                 # Get user position for SELL activities
                 user_token_position = None
@@ -239,7 +269,6 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                     success = sell_activity(target_activity, user_token_position)
                 
                 # Always mark as consumed to prevent double buying
-                # The position-based fallback already handles catching up to target allocation
                 add_consumed_transactions([tx_hash])
                 
             case "SPLIT":
