@@ -132,8 +132,21 @@ def main():
         
         # Fetch recent activities
         print(f"\nFetching recent activities...")
-        target_activities = fetch_activities(target_address, limit=30, after_ts=bot_start_ts)
-        follower_activities = fetch_activities(POLY_MARKET_FUNDER_ADDRESS, limit=30, after_ts=bot_start_ts)
+        all_target_activities = fetch_activities(target_address, limit=30, after_ts=bot_start_ts)
+        all_follower_activities = fetch_activities(POLY_MARKET_FUNDER_ADDRESS, limit=30, after_ts=bot_start_ts)
+        
+        # Filter activities to only include those after bot start (in case API filter didn't work)
+        if bot_start_ts:
+            target_activities = [a for a in all_target_activities if a.get('timestamp', 0) > bot_start_ts]
+            follower_activities = [a for a in all_follower_activities if a.get('timestamp', 0) > bot_start_ts]
+            # Show how many were filtered
+            if len(target_activities) < len(all_target_activities):
+                print(f"  Filtered out {len(all_target_activities) - len(target_activities)} target activities from before bot start")
+            if len(follower_activities) < len(all_follower_activities):
+                print(f"  Filtered out {len(all_follower_activities) - len(follower_activities)} follower activities from before bot start")
+        else:
+            target_activities = all_target_activities
+            follower_activities = all_follower_activities
         
         # Fetch positions for both users
         follower_positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
