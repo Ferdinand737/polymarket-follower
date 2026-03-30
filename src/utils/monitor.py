@@ -20,8 +20,42 @@ LOG_FILE_PATH = Path(__file__).resolve().parent.parent.parent / "logs" / "polyma
 MIN_TRADE_SIZE_USDC = 100.0
 
 
-def fetch_activities(address: str, limit: int = 50):
-    """Fetch recent activity for an address."""
+def get_bot_start_timestamp():
+    """Get timestamp from the first log entry. Returns None if no log exists."""
+    if not LOG_FILE_PATH.exists():
+        return None
+    
+    with open(LOG_FILE_PATH, 'r') as f:
+        first_line = f.readline().strip()
+    
+    if not first_line:
+        return None
+    
+    # Parse timestamp from log format: [dd-monthname-yyyy-hh:mm:ss]
+    # Example: [29-march-2026-12:07:14]
+    try:
+        # Extract the timestamp part between first [ and ]
+        start = first_line.find('[')
+        end = first_line.find(']')
+        if start == -1 or end == -1:
+            return None
+        
+        timestamp_str = first_line[start+1:end]
+        # Parse format: dd-monthname-yyyy-hh:mm:ss
+        dt = datetime.strptime(timestamp_str, "%d-%B-%Y-%H:%M:%S")
+        return int(dt.timestamp())
+    except (ValueError, IndexError):
+        return None
+
+
+def fetch_activities(address: str, limit: int = 50, after_ts: int = None):
+    """Fetch recent activity for an address.
+    
+    Args:
+        address: Wallet address
+        limit: Max number of activities to fetch
+        after_ts: Unix timestamp to filter activities after this time
+    """
     url = "https://data-api.polymarket.com/activity"
     params = {
         "user": address,
@@ -29,6 +63,9 @@ def fetch_activities(address: str, limit: int = 50):
         "sortBy": "TIMESTAMP",
         "sortDirection": "DESC"
     }
+    if after_ts:
+        params["after"] = after_ts
+    
     response = requests.get(url, params=params, timeout=30)
     response.raise_for_status()
     return response.json()
@@ -85,10 +122,18 @@ def main():
         print(f"Follower: {POLY_MARKET_FUNDER_ADDRESS}")
         print(f"Min target order to copy: ${min_order:,.2f}")
         
+        # Get bot start time from log
+        bot_start_ts = get_bot_start_timestamp()
+        if bot_start_ts:
+            bot_start_dt = datetime.fromtimestamp(bot_start_ts)
+            print(f"Bot started: {bot_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            print("Bot start time: Unknown (no log file)")
+        
         # Fetch recent activities
         print(f"\nFetching recent activities...")
-        target_activities = fetch_activities(target_address, limit=30)
-        follower_activities = fetch_activities(POLY_MARKET_FUNDER_ADDRESS, limit=30)
+        target_activities = fetch_activities(target_address, limit=30, after_ts=bot_start_ts)
+        follower_activities = fetch_activities(POLY_MARKET_FUNDER_ADDRESS, limit=30, after_ts=bot_start_ts)
         
         # Fetch positions for both users
         follower_positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
