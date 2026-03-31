@@ -190,7 +190,7 @@ def fetch_activities(address: str, interval_ago_ts: int = None, market: str = No
         "sortDirection": "DESC"
     }
     if interval_ago_ts:
-        params["start"] = interval_ago_ts
+        params["after"] = interval_ago_ts
     if market:
         params["market"] = market
     

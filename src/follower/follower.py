@@ -10,6 +10,24 @@ from follower.helpers import *
 from utils.logger import Logger, LogType
 
 PID_FILE = Path(__file__).parent.parent / "follower.pid"
+LAST_PROCESSED_TS_FILE = Path(__file__).parent.parent / "last_processed_ts.txt"
+
+
+def get_last_processed_ts():
+    """Get the timestamp of the last processed activity."""
+    if LAST_PROCESSED_TS_FILE.exists():
+        try:
+            with open(LAST_PROCESSED_TS_FILE, 'r') as f:
+                return int(f.read().strip())
+        except (ValueError, OSError):
+            return None
+    return None
+
+
+def save_last_processed_ts(ts: int):
+    """Save the timestamp of the last processed activity."""
+    with open(LAST_PROCESSED_TS_FILE, 'w') as f:
+        f.write(str(ts))
 
 
 def check_single_instance():
@@ -78,16 +96,33 @@ def main():
                     sell_all_positions()
                 
                 clear_consumed_transactions()
+                # Reset last processed timestamp on target change
+                if LAST_PROCESSED_TS_FILE.exists():
+                    LAST_PROCESSED_TS_FILE.unlink()
                 current_target_address = target_address
                 save_current_target_address(current_target_address)
                 continue
 
             
             now = datetime.now()
-            interval_ago_ts = int((now - timedelta(minutes=FOLLOWER_CHECK_INTERVAL_MINUTES)).timestamp())
+            
+            # Use last processed timestamp if available, otherwise use interval-based
+            last_processed_ts = get_last_processed_ts()
+            if last_processed_ts:
+                interval_ago_ts = last_processed_ts
+                logger.log(f"Using last processed timestamp: {datetime.fromtimestamp(interval_ago_ts)}")
+            else:
+                interval_ago_ts = int((now - timedelta(minutes=FOLLOWER_CHECK_INTERVAL_MINUTES)).timestamp())
+                logger.log(f"Using interval-based timestamp: {datetime.fromtimestamp(interval_ago_ts)}")
             
 
-            target_activities = fetch_activities(target_address, interval_ago_ts)
+            target_activities = fetch_activities(target_address, interval_ago_ts, limit=50)
+
+            # Track the latest timestamp from activities we're about to process
+            if target_activities:
+                latest_ts = max(a.get('timestamp', 0) for a in target_activities)
+                if latest_ts > 0:
+                    save_last_processed_ts(latest_ts)
 
             process_new_activities(target_activities)
 
