@@ -234,62 +234,64 @@ def main():
         else:
             print("  ✓ No missed trades - all above-threshold BUYS have been copied")
 
-        # Compare allocation percentages for shared positions
-        print(f"\n--- Allocation Comparison ---")
-
-      
-        # Build dicts of positions by conditionId
-        target_pos_by_cid = {p.get('conditionId'): p for p in target_positions if float(p.get('currentValue', 0)) > 0}
-        follower_pos_by_cid = {p.get('conditionId'): p for p in follower_positions if float(p.get('currentValue', 0)) > 0}
-
-
-        # Find shared positions
-        shared_cids = set(target_pos_by_cid.keys()) & set(follower_pos_by_cid.keys())
-
-        allocation_issues = []
-        for cid in shared_cids:
-            target_pos = target_pos_by_cid[cid]
-            follower_pos = follower_pos_by_cid[cid]
-
-            target_usdc = float(target_pos.get('currentValue', 0))
-            follower_usdc = float(follower_pos.get('currentValue', 0))
-
-            # Calculate allocation percentages
-            target_alloc_pct = (target_usdc / target_portfolio_value) * 100 if target_portfolio_value > 0 else 0
-            follower_alloc_pct = (follower_usdc / user_portfolio_value) * 100 if user_portfolio_value > 0 else 0
-
-            alloc_diff = abs(target_alloc_pct - follower_alloc_pct)
-
-            if alloc_diff > 2.0:
-                allocation_issues.append({
-                    'conditionId': cid,
-                    'title': target_pos.get('title', 'Unknown'),
-                    'target_usdc': target_usdc,
-                    'follower_usdc': follower_usdc,
-                    'target_alloc': target_alloc_pct,
-                    'follower_alloc': follower_alloc_pct,
-                    'diff': alloc_diff
-                })
-
-        if allocation_issues:
-            print(f"  ⚠️  {len(allocation_issues)} positions with >2% allocation difference:")
-            for issue in allocation_issues[:10]:
-                print(f"    {issue['title'][:35]}")
-                print(f"      Target: ${issue['target_usdc']:,.0f} ({issue['target_alloc']:.1f}%) | "
-                      f"Follower: ${issue['follower_usdc']:,.0f} ({issue['follower_alloc']:.1f}%) | "
-                      f"Diff: {issue['diff']:.1f}%")
-            
-            # Fetch relevant log entries for allocation issues
-            issue_titles = [issue['title'] for issue in allocation_issues[:5]]
-            log_entries = fetch_log_entries(issue_titles)
-            if log_entries:
-                print(f"\n  Relevant log entries:")
-                for line_num, lines in log_entries[:5]:
-                    for line in lines:
-                        print(f"    {line.rstrip()}")
-                    print()
-        else:
-            print(f"  ✓ All {len(shared_cids)} shared positions within 2% allocation tolerance")
+        # TODO: Allocation comparison disabled - need better solution for idle USDC
+        # The follower account has idle USDC that skews allocation percentages
+        # Need to either: track invested portfolio separately, or auto-allocate USDC
+        
+        # # Compare allocation percentages for shared positions
+        # print(f"\n--- Allocation Comparison ---")
+        # 
+        # # Build dicts of positions by conditionId
+        # target_pos_by_cid = {p.get('conditionId'): p for p in target_positions if float(p.get('currentValue', 0)) > 0}
+        # follower_pos_by_cid = {p.get('conditionId'): p for p in follower_positions if float(p.get('currentValue', 0)) > 0}
+        # 
+        # # Find shared positions
+        # shared_cids = set(target_pos_by_cid.keys()) & set(follower_pos_by_cid.keys())
+        # 
+        # allocation_issues = []
+        # for cid in shared_cids:
+        #     target_pos = target_pos_by_cid[cid]
+        #     follower_pos = follower_pos_by_cid[cid]
+        # 
+        #     target_usdc = float(target_pos.get('currentValue', 0))
+        #     follower_usdc = float(follower_pos.get('currentValue', 0))
+        # 
+        #     # Calculate allocation percentages
+        #     target_alloc_pct = (target_usdc / target_portfolio_value) * 100 if target_portfolio_value > 0 else 0
+        #     follower_alloc_pct = (follower_usdc / user_portfolio_value) * 100 if user_portfolio_value > 0 else 0
+        # 
+        #     alloc_diff = abs(target_alloc_pct - follower_alloc_pct)
+        # 
+        #     if alloc_diff > 2.0:
+        #         allocation_issues.append({
+        #             'conditionId': cid,
+        #             'title': target_pos.get('title', 'Unknown'),
+        #             'target_usdc': target_usdc,
+        #             'follower_usdc': follower_usdc,
+        #             'target_alloc': target_alloc_pct,
+        #             'follower_alloc': follower_alloc_pct,
+        #             'diff': alloc_diff
+        #         })
+        # 
+        # if allocation_issues:
+        #     print(f"  ⚠️  {len(allocation_issues)} positions with >2% allocation difference:")
+        #     for issue in allocation_issues[:10]:
+        #         print(f"    {issue['title'][:35]}")
+        #         print(f"      Target: ${issue['target_usdc']:,.0f} ({issue['target_alloc']:.1f}%) | "
+        #               f"Follower: ${issue['follower_usdc']:,.0f} ({issue['follower_alloc']:.1f}%) | "
+        #               f"Diff: {issue['diff']:.1f}%")
+        #     
+        #     # Fetch relevant log entries for allocation issues
+        #     issue_titles = [issue['title'] for issue in allocation_issues[:5]]
+        #     log_entries = fetch_log_entries(issue_titles)
+        #     if log_entries:
+        #         print(f"\n  Relevant log entries:")
+        #         for line_num, lines in log_entries[:5]:
+        #             for line in lines:
+        #                 print(f"    {line.rstrip()}")
+        #             print()
+        # else:
+        #     print(f"  ✓ All {len(shared_cids)} shared positions within 2% allocation tolerance")
 
         print(f"\n{'='*80}\n")
         

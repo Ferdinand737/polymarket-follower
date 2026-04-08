@@ -63,18 +63,32 @@ def calculate_valid_size(usdc_amount: float, price: float, decimals: int = 4) ->
     The Polymarket API requires:
     - maker_amount = size * price * 10^6 (must result in integer with max 2 decimal precision)
     - taker_amount = size * 10^6 (must result in integer with max 4 decimal precision)
+    
+    Uses Decimal for exact arithmetic to avoid floating-point precision issues.
     """
     if usdc_amount <= 0 or price <= 0:
         return 0.0
     
-    price_cents = int(round(price * 100))
-    scale = 10 ** decimals
+    # Use Decimal for exact arithmetic
+    usdc = Decimal(str(usdc_amount))
+    p = Decimal(str(price))
+    
+    price_cents = int(p * 100)  # Price in cents (integer)
+    scale = Decimal(10 ** decimals)
+    
     # size_raw * price_cents must be divisible by scale for maker amount to have <= 2 decimals
-    step = scale // gcd(price_cents, scale)
-    max_size_raw = int(Decimal(str(usdc_amount)) * scale / Decimal(str(price)))
-    size_raw = (max_size_raw // step) * step
-    size = size_raw / scale
-    # Round to exact decimals to avoid floating-point representation issues
+    step = scale / Decimal(gcd(price_cents, int(scale)))
+    
+    # Calculate max size in raw units
+    max_size_raw = int(usdc * scale / p)
+    
+    # Round down to nearest valid step
+    size_raw = int(Decimal(max_size_raw) / step) * step
+    
+    # Convert back to float with exact precision
+    size = float(Decimal(size_raw) / scale)
+    
+    # Round to exact decimals to avoid any floating-point representation issues
     return round(size, decimals)
 
 
@@ -519,22 +533,32 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
         if user_size_to_buy <= 0:
             continue
 
-        # Ensure size and maker amount have valid precision
-        # Format to string to avoid floating-point representation issues
-        user_size_to_buy = float(f"{user_size_to_buy:.2f}")
+        # Use Decimal for exact validation
+        size = Decimal(str(user_size_to_buy))
+        price = Decimal(str(buy_price))
         
-        order_value = user_size_to_buy * buy_price
-        # Verify maker amount has ≤2 decimals
-        order_value = round(order_value, 2)
+        # Calculate maker amount (size * price) with exact precision
+        maker_amount = size * price
+        # Verify it has exactly 2 decimal places
+        maker_amount_str = f"{maker_amount:.2f}"
+        maker_amount = Decimal(maker_amount_str)
+        
+        # Verify taker amount has exactly 2 decimals (since we used decimals=2)
+        taker_amount_str = f"{size:.2f}"
+        size = Decimal(taker_amount_str)
+        
+        order_value = float(maker_amount)
         
         if order_value < 1.0:
             continue
 
-        logger.log(f"Placing FAK buy order: {user_size_to_buy} shares at price {buy_price}")
+        logger.log(f"Placing FAK buy order: {size} shares at price {buy_price} (maker: ${maker_amount_str})")
 
+        # Convert via string to ensure exact precision - this prevents float representation issues
+        # The API requires: maker_amount (size*price) with max 2 decimals, taker_amount (size) with max 4 decimals
         order_args = OrderArgs(
-            price=buy_price,
-            size=user_size_to_buy,
+            price=float(f"{price:.2f}"),
+            size=float(f"{size:.2f}"),  # Using 2 decimals since that's what we validated
             side=BUY,
             token_id=target_activity.get("asset"),
         )
@@ -640,22 +664,32 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
         if user_size_to_sell <= 0:
             continue
 
-        # Ensure size and maker amount have valid precision
-        # Format to string to avoid floating-point representation issues
-        user_size_to_sell = float(f"{user_size_to_sell:.2f}")
+        # Use Decimal for exact validation
+        size = Decimal(str(user_size_to_sell))
+        price = Decimal(str(sell_price))
         
-        order_value = user_size_to_sell * sell_price
-        # Verify maker amount has ≤2 decimals
-        order_value = round(order_value, 2)
+        # Calculate maker amount (size * price) with exact precision
+        maker_amount = size * price
+        # Verify it has exactly 2 decimal places
+        maker_amount_str = f"{maker_amount:.2f}"
+        maker_amount = Decimal(maker_amount_str)
+        
+        # Verify taker amount has exactly 2 decimals (since we used decimals=2)
+        taker_amount_str = f"{size:.2f}"
+        size = Decimal(taker_amount_str)
+        
+        order_value = float(maker_amount)
         
         if order_value < 1.0:
             continue
 
-        logger.log(f"Placing FAK sell order: {user_size_to_sell} shares at price {sell_price}")
+        logger.log(f"Placing FAK sell order: {size} shares at price {sell_price} (maker: ${maker_amount_str})")
 
+        # Convert via string to ensure exact precision - this prevents float representation issues
+        # The API requires: maker_amount (size*price) with max 2 decimals, taker_amount (size) with max 4 decimals
         order_args = OrderArgs(
-            price=sell_price,
-            size=user_size_to_sell,
+            price=float(f"{price:.2f}"),
+            size=float(f"{size:.2f}"),  # Using 2 decimals since that's what we validated
             side=SELL,
             token_id=token_id,
         )
