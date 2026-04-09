@@ -2,299 +2,551 @@
 """
 Monitor script for Polymarket Follower Bot
 Checks if follower is correctly copying target's big trades.
+Generates a Markdown report for LLM agent review.
 """
 
 import sys
+import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import requests
-from datetime import datetime
-from follower.helpers import get_portfolio_usdc_value, get_on_chain_usdc_balance, POLY_MARKET_FUNDER_ADDRESS
-from utils.utils import get_follow_address
+from datetime import datetime, timezone
 
-# Path to log file
-LOG_FILE_PATH = Path(__file__).resolve().parent.parent.parent / "logs" / "polymarket_follower.log"
+from utils.utils import get_follow_address, POLY_MARKET_FUNDER_ADDRESS, ETHERSCAN_API_KEY
 
-# Minimum USDC for a trade to be considered "big" and worth monitoring
-MIN_TRADE_SIZE_USDC = 100.0
-
-
-def get_bot_start_timestamp():
-    """Get timestamp from the first log entry. Returns None if no log exists."""
-    if not LOG_FILE_PATH.exists():
-        return None
-    
-    with open(LOG_FILE_PATH, 'r') as f:
-        first_line = f.readline().strip()
-    
-    if not first_line:
-        return None
-    
-    # Parse timestamp from log format: [dd-monthname-yyyy-hh:mm:ss]
-    # Example: [29-march-2026-12:07:14]
-    try:
-        # Extract the timestamp part between first [ and ]
-        start = first_line.find('[')
-        end = first_line.find(']')
-        if start == -1 or end == -1:
-            return None
-        
-        timestamp_str = first_line[start+1:end]
-        # Parse format: dd-monthname-yyyy-hh:mm:ss
-        dt = datetime.strptime(timestamp_str, "%d-%B-%Y-%H:%M:%S")
-        return int(dt.timestamp())
-    except (ValueError, IndexError):
-        return None
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+LOG_FILE_PATH = PROJECT_ROOT / "logs" / "polymarket_follower.log"
+REPORTS_DIR = PROJECT_ROOT / "reports"
+PID_FILE = Path(__file__).resolve().parent.parent / "follower.pid"
 
 
-def fetch_activities(address: str, limit: int = 50, after_ts: int = None):
-    """Fetch recent activity for an address.
-    
-    Args:
-        address: Wallet address
-        limit: Max number of activities to fetch
-        after_ts: Unix timestamp to filter activities after this time
-    """
+# ========================================================================== #
+#  Polymarket API helpers (read-only, no trading SDK needed)                  #
+# ========================================================================== #
+
+def fetch_activities(address: str, limit: int = 100, start_ts: int = None):
+    """Fetch activity for an address.  Uses `start` param (unix seconds)."""
     url = "https://data-api.polymarket.com/activity"
     params = {
         "user": address,
         "limit": limit,
         "sortBy": "TIMESTAMP",
-        "sortDirection": "DESC"
+        "sortDirection": "DESC",
     }
-    if after_ts:
-        params["after"] = after_ts
-    
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    if start_ts:
+        params["start"] = start_ts
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
 
-def fetch_positions(address: str):
-    """Fetch current positions for an address."""
+def fetch_positions(address: str, limit: int = 100):
+    """Fetch current open positions (sorted by value DESC)."""
     url = "https://data-api.polymarket.com/positions"
-    params = {"user": address}
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    params = {
+        "user": address,
+        "limit": limit,
+        "sortBy": "CURRENT",
+        "sortDirection": "DESC",
+        "sizeThreshold": 0,
+    }
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
+
+def fetch_portfolio_value(address: str) -> float:
+    """Return total position value in USDC for *address*."""
+    url = "https://data-api.polymarket.com/value"
+    resp = requests.get(url, params={"user": address}, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    if data:
+        return float(data[0].get("value", 0))
+    return 0.0
+
+
+def fetch_on_chain_usdc(address: str) -> float:
+    """Return on-chain USDC balance (Polygon) via Etherscan v2."""
+    url = "https://api.etherscan.io/v2/api"
+    params = {
+        "chainid": 137,
+        "module": "account",
+        "action": "tokenbalance",
+        "contractaddress": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "address": address,
+        "tag": "latest",
+        "apikey": ETHERSCAN_API_KEY,
+    }
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    return int(resp.json().get("result", 0)) / 1e6
+
+
+# ========================================================================== #
+#  Bot status helpers                                                         #
+# ========================================================================== #
+
+def is_bot_running() -> bool:
+    """Check whether the follower process is alive via PID file."""
+    if not PID_FILE.exists():
+        return False
+    try:
+        with open(PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def get_bot_start_timestamp():
+    """Parse timestamp from first log line.  Returns datetime | None."""
+    if not LOG_FILE_PATH.exists():
+        return None
+    with open(LOG_FILE_PATH, "r") as f:
+        first_line = f.readline().strip()
+    if not first_line:
+        return None
+    try:
+        s = first_line.find("[")
+        e = first_line.find("]")
+        if s == -1 or e == -1:
+            return None
+        dt = datetime.strptime(first_line[s + 1 : e], "%d-%B-%Y-%H:%M:%S")
+        return dt
+    except (ValueError, IndexError):
+        return None
+
+
+def format_uptime(start_dt: datetime) -> str:
+    delta = datetime.now() - start_dt
+    days = delta.days
+    hours, rem = divmod(delta.seconds, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+# ========================================================================== #
+#  Log searcher                                                               #
+# ========================================================================== #
 
 def fetch_log_entries(search_terms: list, context_lines: int = 3):
-    """Fetch log entries matching any of the search terms with context."""
+    """Return list of (line_number, [context_lines]) matching any term."""
     if not LOG_FILE_PATH.exists():
         return []
-    
     results = []
-    with open(LOG_FILE_PATH, 'r') as f:
+    with open(LOG_FILE_PATH, "r") as f:
         lines = f.readlines()
-    
     for i, line in enumerate(lines):
         for term in search_terms:
             if term.lower() in line.lower():
-                # Get context lines around the match
                 start = max(0, i - context_lines)
                 end = min(len(lines), i + context_lines + 1)
-                results.append((i + 1, lines[start:end]))  # 1-indexed line number
+                results.append((i + 1, lines[start:end]))
                 break
-    
     return results
 
 
-def calculate_min_target_order():
-    """Calculate minimum target order size for follower to copy."""
-    target_address = get_follow_address()
-    user_portfolio = get_portfolio_usdc_value(POLY_MARKET_FUNDER_ADDRESS) + get_on_chain_usdc_balance(POLY_MARKET_FUNDER_ADDRESS)
-    target_portfolio = get_portfolio_usdc_value(target_address)
-    return 1.0 * target_portfolio / user_portfolio
+# ========================================================================== #
+#  Core analysis                                                              #
+# ========================================================================== #
 
+def calculate_min_target_order(target_portfolio: float, follower_total: float) -> float:
+    """Min USDC a target trade must be for the follower to copy it.
+    The follower copies proportionally: target_trade / target_portfolio * follower_total.
+    The minimum resulting follower order is $1, so:
+        min_target = 1.0 * target_portfolio / follower_total
+    """
+    if follower_total <= 0:
+        return float("inf")
+    return 1.0 * target_portfolio / follower_total
+
+
+def analyse_trades(
+    target_activities,
+    follower_activities,
+    min_order: float,
+    follower_positions,
+    target_portfolio_value: float,
+    follower_total_value: float,
+):
+    """Return (issues: list[str], matched_pairs: list[dict], missed: list, allocation_issues: list)."""
+    issues: list[str] = []
+    matched_pairs: list[dict] = []
+    allocation_issues: list[dict] = []
+
+    target_trades = [a for a in target_activities if a.get("type") == "TRADE"]
+    follower_trades = [a for a in follower_activities if a.get("type") == "TRADE"]
+
+    # Index follower trades by conditionId
+    follower_by_cid: dict[str, list] = {}
+    for t in follower_trades:
+        cid = t.get("conditionId")
+        follower_by_cid.setdefault(cid, []).append(t)
+
+    follower_cids_with_position = {
+        p.get("conditionId")
+        for p in follower_positions
+        if float(p.get("currentValue", 0)) > 0
+    }
+
+    buys_above = [t for t in target_trades if t.get("side") == "BUY" and float(t.get("usdcSize", 0)) >= min_order]
+    buys_below = [t for t in target_trades if t.get("side") == "BUY" and float(t.get("usdcSize", 0)) < min_order]
+    sells = [t for t in target_trades if t.get("side") == "SELL"]
+
+    # --- Check missed buys ---
+    missed = []
+    for t in buys_above:
+        cid = t.get("conditionId")
+        if cid not in follower_by_cid:
+            missed.append(t)
+        else:
+            # Found matching follower trade(s) for this conditionId
+            f_trades = follower_by_cid[cid]
+            # Sum follower USDC for this cid
+            f_usdc = sum(float(ft.get("usdcSize", 0)) for ft in f_trades if ft.get("side") == "BUY")
+            t_usdc = float(t.get("usdcSize", 0))
+
+            # The bot copies proportionally:
+            #   expected_follower = (target_usdc / target_portfolio) * follower_total
+            # Check if the actual follower trade is within 20% of expected.
+            expected_follower = (t_usdc / target_portfolio_value * follower_total_value) if target_portfolio_value > 0 else 0
+            if expected_follower > 0:
+                deviation_pct = abs(f_usdc - expected_follower) / expected_follower * 100
+            else:
+                deviation_pct = 0.0
+
+            matched_pairs.append({
+                "title": t.get("title", "Unknown"),
+                "slug": t.get("slug", ""),
+                "eventSlug": t.get("eventSlug", ""),
+                "target_usdc": t_usdc,
+                "follower_usdc": f_usdc,
+                "expected_follower": expected_follower,
+                "deviation_pct": deviation_pct,
+            })
+
+            if deviation_pct > 20.0:
+                allocation_issues.append(matched_pairs[-1])
+
+    if missed:
+        issues.append(f"MISSED {len(missed)} BUY trade(s) above threshold")
+
+    if allocation_issues:
+        issues.append(f"{len(allocation_issues)} matched trade(s) with >20% size deviation from expected")
+
+    return issues, matched_pairs, missed, allocation_issues
+
+
+# ========================================================================== #
+#  Markdown report generation                                                 #
+# ========================================================================== #
+
+def polymarket_link(event_slug: str, slug: str = "") -> str:
+    if not event_slug:
+        return ""
+    base = f"https://polymarket.com/event/{event_slug}"
+    if slug:
+        base += f"/{slug}"
+    return base
+
+
+def generate_report(
+    *,
+    now: datetime,
+    bot_running: bool,
+    bot_start_dt,
+    target_address: str,
+    follower_address: str,
+    target_cash: float,
+    target_positions_value: float,
+    follower_cash: float,
+    follower_positions_value: float,
+    target_positions: list,
+    follower_positions: list,
+    min_order: float,
+    issues: list[str],
+    matched_pairs: list[dict],
+    missed: list,
+    allocation_issues: list[dict],
+) -> str:
+    lines: list[str] = []
+
+    date_str = now.strftime("%B %d %Y")
+    lines.append(f"# Polymarket Follower Bot Report")
+    lines.append(f"**Date:** {date_str}  ")
+    lines.append(f"**Generated:** {now.strftime('%Y-%m-%d %H:%M:%S')}  ")
+    lines.append("")
+
+    # --- Status ---
+    lines.append("## Bot Status")
+    status = "Running" if bot_running else "Off"
+    lines.append(f"- **Status:** {status}")
+    if bot_start_dt:
+        lines.append(f"- **Started:** {bot_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"- **Uptime:** {format_uptime(bot_start_dt)}")
+    else:
+        lines.append("- **Uptime:** Unknown (no log file)")
+    lines.append(f"- **Min target order to copy:** ${min_order:,.2f}")
+    lines.append("")
+
+    # --- Balances ---
+    target_total = target_cash + target_positions_value
+    follower_total = follower_cash + follower_positions_value
+
+    lines.append("## Balances")
+    lines.append("")
+    lines.append("**Target**")
+    lines.append(f"- Cash: ${target_cash:,.2f}")
+    lines.append(f"- Positions: ${target_positions_value:,.2f}")
+    lines.append(f"- Total: ${target_total:,.2f}")
+    lines.append(f"- Address: `{target_address}`")
+    lines.append("")
+    lines.append("**Follower**")
+    lines.append(f"- Cash: ${follower_cash:,.2f}")
+    lines.append(f"- Positions: ${follower_positions_value:,.2f}")
+    lines.append(f"- Total: ${follower_total:,.2f}")
+    lines.append(f"- Address: `{follower_address}`")
+    lines.append("")
+
+    # --- Top 5 Positions ---
+    def _positions_list(positions: list, total_value: float) -> list[str]:
+        out = []
+        for i, p in enumerate(positions[:5], 1):
+            val = float(p.get("currentValue", 0))
+            title = p.get("title", "Unknown")
+            slug = p.get("slug", "")
+            event_slug = p.get("eventSlug", "")
+            pct = (val / total_value * 100) if total_value > 0 else 0
+            link = polymarket_link(event_slug, slug)
+            if link:
+                out.append(f"{i}. **[{title}]({link})**")
+            else:
+                out.append(f"{i}. **{title}**")
+            out.append(f"   ${val:,.2f} ({pct:.1f}%)")
+        return out
+
+    lines.append("## Top 5 Positions — Target")
+    lines.extend(_positions_list(target_positions, target_total))
+    lines.append("")
+
+    lines.append("## Top 5 Positions — Follower")
+    lines.extend(_positions_list(follower_positions, follower_total))
+    lines.append("")
+
+    # --- Issues ---
+    issue_num = 0
+    has_issues = missed or allocation_issues
+
+    if not has_issues:
+        lines.append("## Trade Sync")
+        lines.append("No issues detected. All above-threshold target BUYs have been copied.")
+        lines.append("")
+    else:
+        lines.append("## ISSUES FOUND")
+        lines.append("")
+
+        # Missed trades
+        for t in missed[:10]:
+            issue_num += 1
+            usdc = float(t.get("usdcSize", 0))
+            title = t.get("title", "Unknown")
+            event_slug = t.get("eventSlug", "")
+            slug = t.get("slug", "")
+            link = polymarket_link(event_slug, slug)
+
+            lines.append(f"### Issue {issue_num} — Missed Trade")
+            title_md = f"[{title}]({link})" if link else title
+            lines.append(f"**Market:** {title_md}")
+            lines.append(f"**Type:** Target BUY above threshold was NOT copied by follower")
+            lines.append(f"**Target trade size:** ${usdc:,.2f}")
+            lines.append("")
+
+            # Per-issue log lines
+            log_entries = fetch_log_entries([title[:40]], context_lines=2)
+            if log_entries:
+                lines.append("**Relevant logs:**")
+                lines.append("```")
+                seen = set()
+                for line_num, ctx_lines in log_entries[:5]:
+                    if line_num in seen:
+                        continue
+                    seen.add(line_num)
+                    for l in ctx_lines:
+                        lines.append(l.rstrip())
+                    lines.append("")
+                lines.append("```")
+            lines.append("")
+
+        # Size deviations
+        for a in allocation_issues[:10]:
+            issue_num += 1
+            title = a["title"]
+            slug = a.get("slug", "")
+            event_slug = a.get("eventSlug", "")
+            link = polymarket_link(event_slug, slug)
+
+            lines.append(f"### Issue {issue_num} — Size Deviation")
+            title_md = f"[{title}]({link})" if link else title
+            lines.append(f"**Market:** {title_md}")
+            lines.append(f"**Type:** Follower trade size deviates >20% from expected")
+            lines.append(f"**Target traded:** ${a['target_usdc']:,.2f}")
+            lines.append(f"**Expected follower trade:** ${a['expected_follower']:,.2f}")
+            lines.append(f"**Actual follower trade:** ${a['follower_usdc']:,.2f}")
+            lines.append(f"**Deviation:** {a['deviation_pct']:.0f}%")
+            lines.append("")
+
+            # Per-issue log lines
+            log_entries = fetch_log_entries([title[:40]], context_lines=2)
+            if log_entries:
+                lines.append("**Relevant logs:**")
+                lines.append("```")
+                seen = set()
+                for line_num, ctx_lines in log_entries[:5]:
+                    if line_num in seen:
+                        continue
+                    seen.add(line_num)
+                    for l in ctx_lines:
+                        lines.append(l.rstrip())
+                    lines.append("")
+                lines.append("```")
+            lines.append("")
+
+    # --- Matched trades summary (no issues, just info) ---
+    if matched_pairs:
+        lines.append("## Matched Trades")
+        for m in matched_pairs[:15]:
+            status = "✅" if m["deviation_pct"] <= 20 else "⚠️"
+            lines.append(
+                f"- {status} **{m['title'][:50]}** — target ${m['target_usdc']:,.2f} "
+                f"/ follower ${m['follower_usdc']:,.2f} (expected ${m['expected_follower']:,.2f}, {m['deviation_pct']:.0f}% off)"
+            )
+        lines.append("")
+
+    # --- LLM section placeholder ---
+    lines.append("## Agent Notes")
+    lines.append("_This section is reserved for the LLM agent to append findings, actions taken, or general comments._")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# ========================================================================== #
+#  Main                                                                       #
+# ========================================================================== #
 
 def main():
     print(f"\n{'='*80}")
-    print(f"Polymarket Follower Monitor - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Polymarket Follower Monitor — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*80}")
-    
+
     try:
         target_address = get_follow_address()
-        min_order = calculate_min_target_order()
-        
-        print(f"\nTarget: {target_address}")
-        print(f"Follower: {POLY_MARKET_FUNDER_ADDRESS}")
-        print(f"Min target order to copy: ${min_order:,.2f}")
-        
-        # Get bot start time from log
-        bot_start_ts = get_bot_start_timestamp()
-        if bot_start_ts:
-            bot_start_dt = datetime.fromtimestamp(bot_start_ts)
-            print(f"Bot started: {bot_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-        else:
-            print("Bot start time: Unknown (no log file)")
-        
-        # Fetch recent activities
-        print(f"\nFetching recent activities...")
-        all_target_activities = fetch_activities(target_address, limit=30, after_ts=bot_start_ts)
-        all_follower_activities = fetch_activities(POLY_MARKET_FUNDER_ADDRESS, limit=30, after_ts=bot_start_ts)
-        
-        # Filter activities to only include those after bot start (in case API filter didn't work)
-        if bot_start_ts:
-            target_activities = [a for a in all_target_activities if a.get('timestamp', 0) > bot_start_ts]
-            follower_activities = [a for a in all_follower_activities if a.get('timestamp', 0) > bot_start_ts]
-            # Show how many were filtered
-            if len(target_activities) < len(all_target_activities):
-                print(f"  Filtered out {len(all_target_activities) - len(target_activities)} target activities from before bot start")
-            if len(follower_activities) < len(all_follower_activities):
-                print(f"  Filtered out {len(all_follower_activities) - len(follower_activities)} follower activities from before bot start")
-        else:
-            target_activities = all_target_activities
-            follower_activities = all_follower_activities
-        
-        # Fetch positions for both users
-        follower_positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
+        follower_address = POLY_MARKET_FUNDER_ADDRESS
+
+        # --- Bot status ---
+        bot_running = is_bot_running()
+        bot_start_dt = get_bot_start_timestamp()
+        print(f"\nBot running: {'Yes' if bot_running else 'No'}")
+        if bot_start_dt:
+            print(f"Bot started: {bot_start_dt.strftime('%Y-%m-%d %H:%M:%S')}  (uptime: {format_uptime(bot_start_dt)})")
+        bot_start_ts = int(bot_start_dt.timestamp()) if bot_start_dt else None
+
+        # --- Balances ---
+        print("\nFetching balances...")
+        target_positions_value = fetch_portfolio_value(target_address)
+        follower_positions_value = fetch_portfolio_value(follower_address)
+        target_cash = fetch_on_chain_usdc(target_address)
+        follower_cash = fetch_on_chain_usdc(follower_address)
+        target_total = target_cash + target_positions_value
+        follower_total = follower_cash + follower_positions_value
+
+        print(f"  Target  — cash: ${target_cash:,.2f}  positions: ${target_positions_value:,.2f}  total: ${target_total:,.2f}")
+        print(f"  Follower — cash: ${follower_cash:,.2f}  positions: ${follower_positions_value:,.2f}  total: ${follower_total:,.2f}")
+
+        min_order = calculate_min_target_order(target_positions_value, follower_total)
+        print(f"  Min target order to copy: ${min_order:,.2f}")
+
+        # --- Positions ---
+        print("\nFetching positions...")
         target_positions = fetch_positions(target_address)
-        follower_condition_ids_with_position = {p.get('conditionId') for p in follower_positions if float(p.get('totalUsdc', 0)) > 0}
+        follower_positions = fetch_positions(follower_address)
+        print(f"  Target positions: {len(target_positions)}")
+        print(f"  Follower positions: {len(follower_positions)}")
 
-        # Calculate portfolio values for allocation comparison
-        user_portfolio_value = get_portfolio_usdc_value(POLY_MARKET_FUNDER_ADDRESS) + get_on_chain_usdc_balance(POLY_MARKET_FUNDER_ADDRESS)
-        target_portfolio_value = get_portfolio_usdc_value(target_address)
-        
-        # Filter for trades
-        target_trades = [a for a in target_activities if a.get('type') == 'TRADE']
-        follower_trades = [a for a in follower_activities if a.get('type') == 'TRADE']
-        
-        # Categorize target trades
-        sells = [t for t in target_trades if t.get('side') == 'SELL']
-        buys = [t for t in target_trades if t.get('side') == 'BUY']
-        
-        print(f"\n--- Target Recent Trades ---")
-        for t in target_trades[:15]:
-            usdc = t.get('usdcSize', 0)
-            side = t.get('side', '?')
-            title = t.get('title', '')[:40]
-            above = "✓" if usdc >= min_order else "✗"
-            print(f"  {above} ${usdc:>8.2f} | {side:4} | {title}")
-        
-        print(f"\n--- Follower Recent Trades ---")
-        for t in follower_trades[:10]:
-            usdc = t.get('usdcSize', 0)
-            side = t.get('side', '?')
-            title = t.get('title', '')[:40]
-            print(f"  ${usdc:>8.2f} | {side:4} | {title}")
-        
-        # Analyze trades
-        print(f"\n--- Trade Analysis ---")
-        
-        # SELLs: Only copy if we have the position
-        sell_without_position = []
-        sell_with_position = []
-        for t in sells:
-            cid = t.get('conditionId')
-            usdc = t.get('usdcSize', 0)
-            if cid in follower_condition_ids_with_position:
-                sell_with_position.append(t)
-            else:
-                sell_without_position.append(t)
-        
-        if sell_without_position:
-            print(f"\n  SELLS skipped (no position):")
-            for t in sell_without_position[:5]:
-                print(f"    ${t.get('usdcSize',0):>8.2f} | {t.get('title','')[:40]}")
-        
-        # BUYs: Check if above threshold
-        buys_below_threshold = [t for t in buys if t.get('usdcSize', 0) < min_order]
-        buys_above_threshold = [t for t in buys if t.get('usdcSize', 0) >= min_order]
-        
-        if buys_below_threshold:
-            print(f"\n  BUYS skipped (below ${min_order:.0f} threshold):")
-            for t in buys_below_threshold[:5]:
-                print(f"    ${t.get('usdcSize',0):>8.2f} | {t.get('title','')[:40]}")
-        
-        # Check for missed trades (above threshold, should have been copied)
-        follower_condition_ids = {t.get('conditionId') for t in follower_trades}
-        missed = []
-        for t in buys_above_threshold:
-            cid = t.get('conditionId')
-            if cid not in follower_condition_ids:
-                missed.append(t)
-        
-        print(f"\n--- Sync Status ---")
-        if missed:
-            print(f"  ⚠️  MISSED {len(missed)} trades above threshold!")
-            for t in missed[:5]:
-                print(f"    ${t.get('usdcSize',0):>8.2f} | {t.get('title','')[:40]}")
-            
-            # Fetch relevant log entries for missed trades
-            missed_titles = [t.get('title', '')[:40] for t in missed[:5]]
-            log_entries = fetch_log_entries(missed_titles)
-            if log_entries:
-                print(f"\n  Relevant log entries:")
-                for line_num, lines in log_entries[:5]:
-                    for line in lines:
-                        print(f"    {line.rstrip()}")
-                    print()
+        # --- Activities ---
+        print("\nFetching activities...")
+        target_activities = fetch_activities(target_address, limit=100, start_ts=bot_start_ts)
+        follower_activities = fetch_activities(follower_address, limit=100, start_ts=bot_start_ts)
+        # Safety filter
+        if bot_start_ts:
+            target_activities = [a for a in target_activities if a.get("timestamp", 0) >= bot_start_ts]
+            follower_activities = [a for a in follower_activities if a.get("timestamp", 0) >= bot_start_ts]
+        print(f"  Target activities (since bot start): {len(target_activities)}")
+        print(f"  Follower activities (since bot start): {len(follower_activities)}")
+
+        # --- Analysis ---
+        print("\nAnalysing trades...")
+        issues, matched_pairs, missed, allocation_issues = analyse_trades(
+            target_activities,
+            follower_activities,
+            min_order,
+            follower_positions,
+            target_positions_value,
+            follower_total,
+        )
+
+        # --- Print issues to console ---
+        if issues:
+            print(f"\n--- Issues Found ---")
+            for issue in issues:
+                print(f"  ⚠️  {issue}")
         else:
-            print("  ✓ No missed trades - all above-threshold BUYS have been copied")
+            print("\n  ✓ No issues detected")
 
-        # TODO: Allocation comparison disabled - need better solution for idle USDC
-        # The follower account has idle USDC that skews allocation percentages
-        # Need to either: track invested portfolio separately, or auto-allocate USDC
-        
-        # # Compare allocation percentages for shared positions
-        # print(f"\n--- Allocation Comparison ---")
-        # 
-        # # Build dicts of positions by conditionId
-        # target_pos_by_cid = {p.get('conditionId'): p for p in target_positions if float(p.get('currentValue', 0)) > 0}
-        # follower_pos_by_cid = {p.get('conditionId'): p for p in follower_positions if float(p.get('currentValue', 0)) > 0}
-        # 
-        # # Find shared positions
-        # shared_cids = set(target_pos_by_cid.keys()) & set(follower_pos_by_cid.keys())
-        # 
-        # allocation_issues = []
-        # for cid in shared_cids:
-        #     target_pos = target_pos_by_cid[cid]
-        #     follower_pos = follower_pos_by_cid[cid]
-        # 
-        #     target_usdc = float(target_pos.get('currentValue', 0))
-        #     follower_usdc = float(follower_pos.get('currentValue', 0))
-        # 
-        #     # Calculate allocation percentages
-        #     target_alloc_pct = (target_usdc / target_portfolio_value) * 100 if target_portfolio_value > 0 else 0
-        #     follower_alloc_pct = (follower_usdc / user_portfolio_value) * 100 if user_portfolio_value > 0 else 0
-        # 
-        #     alloc_diff = abs(target_alloc_pct - follower_alloc_pct)
-        # 
-        #     if alloc_diff > 2.0:
-        #         allocation_issues.append({
-        #             'conditionId': cid,
-        #             'title': target_pos.get('title', 'Unknown'),
-        #             'target_usdc': target_usdc,
-        #             'follower_usdc': follower_usdc,
-        #             'target_alloc': target_alloc_pct,
-        #             'follower_alloc': follower_alloc_pct,
-        #             'diff': alloc_diff
-        #         })
-        # 
-        # if allocation_issues:
-        #     print(f"  ⚠️  {len(allocation_issues)} positions with >2% allocation difference:")
-        #     for issue in allocation_issues[:10]:
-        #         print(f"    {issue['title'][:35]}")
-        #         print(f"      Target: ${issue['target_usdc']:,.0f} ({issue['target_alloc']:.1f}%) | "
-        #               f"Follower: ${issue['follower_usdc']:,.0f} ({issue['follower_alloc']:.1f}%) | "
-        #               f"Diff: {issue['diff']:.1f}%")
-        #     
-        #     # Fetch relevant log entries for allocation issues
-        #     issue_titles = [issue['title'] for issue in allocation_issues[:5]]
-        #     log_entries = fetch_log_entries(issue_titles)
-        #     if log_entries:
-        #         print(f"\n  Relevant log entries:")
-        #         for line_num, lines in log_entries[:5]:
-        #             for line in lines:
-        #                 print(f"    {line.rstrip()}")
-        #             print()
-        # else:
-        #     print(f"  ✓ All {len(shared_cids)} shared positions within 2% allocation tolerance")
+        # --- Generate report ---
+        now = datetime.now()
+        report_md = generate_report(
+            now=now,
+            bot_running=bot_running,
+            bot_start_dt=bot_start_dt,
+            target_address=target_address,
+            follower_address=follower_address,
+            target_cash=target_cash,
+            target_positions_value=target_positions_value,
+            follower_cash=follower_cash,
+            follower_positions_value=follower_positions_value,
+            target_positions=target_positions,
+            follower_positions=follower_positions,
+            min_order=min_order,
+            issues=issues,
+            matched_pairs=matched_pairs,
+            missed=missed,
+            allocation_issues=allocation_issues,
+        )
 
-        print(f"\n{'='*80}\n")
-        
+        # --- Save report ---
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"report_{now.strftime('%Y-%m-%d_%H%M%S')}.md"
+        report_path = REPORTS_DIR / filename
+        with open(report_path, "w") as f:
+            f.write(report_md)
+
+        print(f"\n{'='*80}")
+        print(f"Report saved: {report_path}")
+        print(f"{'='*80}\n")
+
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback
