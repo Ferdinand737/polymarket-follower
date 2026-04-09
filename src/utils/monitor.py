@@ -158,6 +158,22 @@ def fetch_log_entries(search_terms: list, context_lines: int = 3):
     return results
 
 
+def fetch_error_logs(max_entries: int = 20) -> list[str]:
+    """Fetch recent ERROR-level log entries with context.
+    Returns list of formatted strings ready for display."""
+    entries = fetch_log_entries(["[ERROR]"], context_lines=2)
+    if not entries:
+        return []
+    # Take the most recent entries (they're appended chronologically)
+    recent = entries[-max_entries:]
+    formatted = []
+    for line_num, ctx_lines in recent:
+        for l in ctx_lines:
+            formatted.append(l.rstrip())
+        formatted.append("")  # blank line between entries
+    return formatted
+
+
 # ========================================================================== #
 #  Core analysis                                                              #
 # ========================================================================== #
@@ -301,6 +317,7 @@ def generate_report(
     matched_pairs: list[dict],
     missed: list,
     allocation_issues: list[dict],
+    error_logs: list[str],
 ) -> str:
     lines: list[str] = []
 
@@ -455,6 +472,18 @@ def generate_report(
             )
         lines.append("")
 
+    # --- Error logs ---
+    if error_logs:
+        lines.append("## Recent Errors")
+        lines.append("")
+        for log_line in error_logs:
+            lines.append(log_line)
+        lines.append("")
+    else:
+        lines.append("## Recent Errors")
+        lines.append("No ERROR-level entries found in logs.")
+        lines.append("")
+
     # --- LLM section placeholder ---
     lines.append("## Agent Notes")
     lines.append("_This section is reserved for the LLM agent to append findings, actions taken, or general comments._")
@@ -537,6 +566,16 @@ def main():
         else:
             print("\n  ✓ No issues detected")
 
+        # --- Fetch error logs ---
+        print("\nFetching error logs...")
+        error_logs = fetch_error_logs(max_entries=10)
+        if error_logs:
+            print(f"  ⚠️ Found {len(error_logs)} error log entries:")
+            for line in error_logs[:30]:
+                print(f"    {line}")
+        else:
+            print("  ✓ No ERROR entries found in logs")
+
         # --- Generate report ---
         now = datetime.now()
         report_md = generate_report(
@@ -556,6 +595,7 @@ def main():
             matched_pairs=matched_pairs,
             missed=missed,
             allocation_issues=allocation_issues,
+            error_logs=error_logs,
         )
 
         # --- Save report ---
