@@ -178,12 +178,19 @@ def analyse_trades(
     follower_activities,
     min_order: float,
     follower_positions,
+    target_positions,
     target_portfolio_value: float,
     follower_total_value: float,
 ):
-    """Return (issues: list[str], matched_pairs: list[dict], missed: list, allocation_issues: list)."""
+    """Return (issues: list[str], matched_pairs: list[dict], missed: list, allocation_issues: list).
+
+    Uses position-fraction comparison instead of trade-by-trade matching.
+    This correctly handles markets where the target makes many small trades
+    (e.g. live sports) that the follower copies across multiple cycles.
+    """
     issues: list[str] = []
     matched_pairs: list[dict] = []
+    missed: list[dict] = []
     allocation_issues: list[dict] = []
 
     target_trades = [a for a in target_activities if a.get("type") == "TRADE"]
@@ -195,56 +202,70 @@ def analyse_trades(
         cid = t.get("conditionId")
         follower_by_cid.setdefault(cid, []).append(t)
 
-    follower_cids_with_position = {
-        p.get("conditionId")
-        for p in follower_positions
-        if float(p.get("currentValue", 0)) > 0
-    }
-
+    # --- Check missed buys (trades above threshold with no follower copy at all) ---
     buys_above = [t for t in target_trades if t.get("side") == "BUY" and float(t.get("usdcSize", 0)) >= min_order]
-    buys_below = [t for t in target_trades if t.get("side") == "BUY" and float(t.get("usdcSize", 0)) < min_order]
-    sells = [t for t in target_trades if t.get("side") == "SELL"]
-
-    # --- Check missed buys ---
-    missed = []
     for t in buys_above:
         cid = t.get("conditionId")
         if cid not in follower_by_cid:
             missed.append(t)
-        else:
-            # Found matching follower trade(s) for this conditionId
-            f_trades = follower_by_cid[cid]
-            # Sum follower USDC for this cid
-            f_usdc = sum(float(ft.get("usdcSize", 0)) for ft in f_trades if ft.get("side") == "BUY")
-            t_usdc = float(t.get("usdcSize", 0))
-
-            # The bot copies proportionally:
-            #   expected_follower = (target_usdc / target_portfolio) * follower_total
-            # Check if the actual follower trade is within 20% of expected.
-            expected_follower = (t_usdc / target_portfolio_value * follower_total_value) if target_portfolio_value > 0 else 0
-            if expected_follower > 0:
-                deviation_pct = abs(f_usdc - expected_follower) / expected_follower * 100
-            else:
-                deviation_pct = 0.0
-
-            matched_pairs.append({
-                "title": t.get("title", "Unknown"),
-                "slug": t.get("slug", ""),
-                "eventSlug": t.get("eventSlug", ""),
-                "target_usdc": t_usdc,
-                "follower_usdc": f_usdc,
-                "expected_follower": expected_follower,
-                "deviation_pct": deviation_pct,
-            })
-
-            if deviation_pct > 20.0:
-                allocation_issues.append(matched_pairs[-1])
 
     if missed:
         issues.append(f"MISSED {len(missed)} BUY trade(s) above threshold")
 
+    # --- Position-fraction comparison (the real check) ---
+    # Build position indexes by conditionId
+    target_pos_by_cid: dict[str, dict] = {}
+    for p in target_positions:
+        cid = p.get("conditionId")
+        val = float(p.get("currentValue", 0))
+        if val > 0:
+            target_pos_by_cid[cid] = p
+
+    follower_pos_by_cid: dict[str, dict] = {}
+    for p in follower_positions:
+        cid = p.get("conditionId")
+        val = float(p.get("currentValue", 0))
+        if val > 0:
+            follower_pos_by_cid[cid] = p
+
+    # Compare position fractions for markets where BOTH have positions
+    for cid, t_pos in target_pos_by_cid.items():
+        if cid not in follower_pos_by_cid:
+            continue
+
+        f_pos = follower_pos_by_cid[cid]
+        t_val = float(t_pos.get("currentValue", 0))
+        f_val = float(f_pos.get("currentValue", 0))
+
+        t_frac = (t_val / target_portfolio_value * 100) if target_portfolio_value > 0 else 0
+        f_frac = (f_val / follower_total_value * 100) if follower_total_value > 0 else 0
+
+        # Absolute difference in percentage points
+        frac_diff = f_frac - t_frac
+        # Relative deviation: how much is the follower off from the target fraction?
+        deviation_pct = (abs(frac_diff) / t_frac * 100) if t_frac > 0 else 0
+
+        entry = {
+            "title": t_pos.get("title", "Unknown"),
+            "slug": t_pos.get("slug", ""),
+            "eventSlug": t_pos.get("eventSlug", ""),
+            "target_value": t_val,
+            "follower_value": f_val,
+            "target_fraction_pct": t_frac,
+            "follower_fraction_pct": f_frac,
+            "fraction_diff_pp": frac_diff,
+            "deviation_pct": deviation_pct,
+        }
+
+        matched_pairs.append(entry)
+
+        # Flag if follower is more than 2x the target fraction (100%+ relative deviation)
+        # and the absolute difference is > 0.5 percentage points
+        if deviation_pct > 100 and abs(frac_diff) > 0.5:
+            allocation_issues.append(entry)
+
     if allocation_issues:
-        issues.append(f"{len(allocation_issues)} matched trade(s) with >20% size deviation from expected")
+        issues.append(f"{len(allocation_issues)} position(s) with significant allocation mismatch (>2x target fraction)")
 
     return issues, matched_pairs, missed, allocation_issues
 
@@ -389,7 +410,7 @@ def generate_report(
                 lines.append("```")
             lines.append("")
 
-        # Size deviations
+        # Allocation mismatches
         for a in allocation_issues[:10]:
             issue_num += 1
             title = a["title"]
@@ -397,13 +418,13 @@ def generate_report(
             event_slug = a.get("eventSlug", "")
             link = polymarket_link(event_slug, slug)
 
-            lines.append(f"### Issue {issue_num} — Size Deviation")
+            lines.append(f"### Issue {issue_num} — Allocation Mismatch")
             title_md = f"[{title}]({link})" if link else title
             lines.append(f"**Market:** {title_md}")
-            lines.append(f"**Type:** Follower trade size deviates >20% from expected")
-            lines.append(f"**Target traded:** ${a['target_usdc']:,.2f}")
-            lines.append(f"**Expected follower trade:** ${a['expected_follower']:,.2f}")
-            lines.append(f"**Actual follower trade:** ${a['follower_usdc']:,.2f}")
+            lines.append(f"**Type:** Follower position fraction deviates >2x from target")
+            lines.append(f"**Target position:** ${a['target_value']:,.2f} ({a['target_fraction_pct']:.1f}% of portfolio)")
+            lines.append(f"**Follower position:** ${a['follower_value']:,.2f} ({a['follower_fraction_pct']:.1f}% of portfolio)")
+            lines.append(f"**Difference:** {a['fraction_diff_pp']:+.1f} percentage points")
             lines.append(f"**Deviation:** {a['deviation_pct']:.0f}%")
             lines.append("")
 
@@ -423,14 +444,14 @@ def generate_report(
                 lines.append("```")
             lines.append("")
 
-    # --- Matched trades summary (no issues, just info) ---
+    # --- Position alignment summary ---
     if matched_pairs:
-        lines.append("## Matched Trades")
+        lines.append("## Position Alignment")
         for m in matched_pairs[:15]:
-            status = "✅" if m["deviation_pct"] <= 20 else "⚠️"
+            status = "✅" if m["deviation_pct"] <= 50 else "⚠️"
             lines.append(
-                f"- {status} **{m['title'][:50]}** — target ${m['target_usdc']:,.2f} "
-                f"/ follower ${m['follower_usdc']:,.2f} (expected ${m['expected_follower']:,.2f}, {m['deviation_pct']:.0f}% off)"
+                f"- {status} **{m['title'][:50]}** — target {m['target_fraction_pct']:.1f}% "
+                f"/ follower {m['follower_fraction_pct']:.1f}% ({m['deviation_pct']:.0f}% off)"
             )
         lines.append("")
 
@@ -503,6 +524,7 @@ def main():
             follower_activities,
             min_order,
             follower_positions,
+            target_positions,
             target_positions_value,
             follower_total,
         )
