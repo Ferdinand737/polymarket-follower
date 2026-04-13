@@ -122,7 +122,7 @@ def main():
             if target_activities:
                 latest_ts = max(a.get('timestamp', 0) for a in target_activities)
                 if latest_ts > 0:
-                    save_last_processed_ts(latest_ts)
+                    save_last_processed_ts(latest_ts + 1)
 
             process_new_activities(target_activities)
 
