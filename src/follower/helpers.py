@@ -498,12 +498,6 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             logger.log("User position portfolio fraction is greater than or equal to target position portfolio fraction, skipping.", log_type=LogType.WARNING)
             return False
 
-        # Skip if the allocation difference is negligible (<0.5% of portfolio)
-        # This prevents death-by-a-thousand-tiny-buys on actively traded markets
-        if fraction_diff < 0.005:
-            logger.log(f"Position fraction difference ({fraction_diff*100:.2f}%) is below 0.5% threshold, skipping.", log_type=LogType.WARNING)
-            return False
-
         user_usdc_needed = target_position_portfolio_fraction * user_total_usdc_value - current_user_position_value
         logger.log(f"User USDC needed to match target fraction: {user_usdc_needed}")
 
