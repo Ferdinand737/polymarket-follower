@@ -897,7 +897,9 @@ def redeem_all_positions():
     global _attempted_redeems
     
     positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
-    redeemable = [p for p in positions if p.get("redeemable")]
+    # Only redeem positions that have currentValue > 0
+    # Positions with currentValue=0 are losing bets with nothing to redeem
+    redeemable = [p for p in positions if p.get("redeemable") and float(p.get("currentValue", 0)) > 0]
     
     if not redeemable:
         _attempted_redeems.clear()  # No redeemable positions, clear tracking
