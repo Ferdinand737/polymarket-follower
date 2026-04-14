@@ -885,22 +885,52 @@ def redeem_activity(activity: Dict[str, Any]):
         return
 
 
+# Track recently attempted redeems to avoid retrying failed redeems every cycle
+_attempted_redeems = {}  # conditionId -> timestamp of last attempt
+_REDEEM_RETRY_INTERVAL = 3600  # Only retry a failed redeem after 1 hour
+
+
 def redeem_all_positions():
     """Check all follower positions and redeem any that are redeemable.
-    Called each cycle in the main loop to auto-redeem settled markets."""
+    Called each cycle in the main loop to auto-redeem settled markets.
+    Tracks attempted redeems to avoid hammering the same failed position every cycle."""
+    global _attempted_redeems
+    
     positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
     redeemable = [p for p in positions if p.get("redeemable")]
     
     if not redeemable:
+        _attempted_redeems.clear()  # No redeemable positions, clear tracking
         return
     
-    logger.log(f"Found {len(redeemable)} redeemable position(s)")
+    now = time.time()
+    # Filter out positions we recently attempted (within the retry interval)
+    to_redeem = []
+    skipped = []
+    for p in redeemable:
+        cid = p.get('conditionId')
+        last_attempt = _attempted_redeems.get(cid, 0)
+        if now - last_attempt < _REDEEM_RETRY_INTERVAL:
+            skipped.append(p.get('title', 'Unknown')[:50])
+        else:
+            to_redeem.append(p)
     
-    for position in redeemable:
+    if skipped:
+        logger.log(f"Skipping {len(skipped)} recently-attempted redeem(s): {', '.join(skipped)}")
+    
+    if not to_redeem:
+        return
+    
+    logger.log(f"Found {len(to_redeem)} redeemable position(s) to process")
+    
+    for position in to_redeem:
         title = position.get('title', 'Unknown')[:50]
         size = position.get('size', 0)
         condition_id = position.get('conditionId')
         logger.log(f"Redeeming {size} shares from {title}")
+        
+        # Record the attempt
+        _attempted_redeems[condition_id] = now
         
         try:
             data = Web3().eth.contract(
@@ -919,6 +949,8 @@ def redeem_all_positions():
             if hasattr(response, 'wait'):
                 response.wait()
             logger.log(f"Successfully redeemed {size} shares from {title}")
+            # If successful, remove from attempted tracking so it won't be retried
+            _attempted_redeems.pop(condition_id, None)
         except Exception as e:
             logger.log(f"Failed to redeem {title}: {e}", LogType.ERROR)
 
