@@ -118,13 +118,21 @@ def main():
 
             target_activities = fetch_activities(target_address, interval_ago_ts, limit=50)
 
-            # Track the latest timestamp from activities we're about to process
+            process_new_activities(target_activities)
+
+            # Save timestamp AFTER processing so we don't skip activities on crash
             if target_activities:
                 latest_ts = max(a.get('timestamp', 0) for a in target_activities)
                 if latest_ts > 0:
                     save_last_processed_ts(latest_ts + 1)
 
-            process_new_activities(target_activities)
+            # Auto-redeem any settled positions
+            redeem_all_positions()
+
+            # Prune consumed_transactions: since `start` param now correctly filters,
+            # we'll never re-see activities older than last_processed_ts.
+            # Safe to clear the consumed set after advancing the timestamp.
+            clear_consumed_transactions()
 
             for remaining in range(FOLLOWER_CHECK_INTERVAL_MINUTES * 60, 0, -1):
                 minutes = remaining // 60

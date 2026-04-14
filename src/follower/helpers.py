@@ -204,7 +204,7 @@ def fetch_activities(address: str, interval_ago_ts: int = None, market: str = No
         "sortDirection": "DESC"
     }
     if interval_ago_ts:
-        params["after"] = interval_ago_ts
+        params["start"] = interval_ago_ts
     if market:
         params["market"] = market
     
@@ -883,6 +883,44 @@ def redeem_activity(activity: Dict[str, Any]):
     except Exception as e:
         logger.log(str(e), LogType.ERROR)
         return
+
+
+def redeem_all_positions():
+    """Check all follower positions and redeem any that are redeemable.
+    Called each cycle in the main loop to auto-redeem settled markets."""
+    positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
+    redeemable = [p for p in positions if p.get("redeemable")]
+    
+    if not redeemable:
+        return
+    
+    logger.log(f"Found {len(redeemable)} redeemable position(s)")
+    
+    for position in redeemable:
+        title = position.get('title', 'Unknown')[:50]
+        size = position.get('size', 0)
+        condition_id = position.get('conditionId')
+        logger.log(f"Redeeming {size} shares from {title}")
+        
+        try:
+            data = Web3().eth.contract(
+                address=CTF,
+                abi=[{"name": "redeemPositions", "type": "function", "inputs": [{"name": "collateralToken", "type": "address"}, {"name": "parentCollectionId", "type": "bytes32"}, {"name": "conditionId", "type": "bytes32"}, {"name": "indexSets", "type": "uint256[]"}], "outputs": []}]
+            ).encode_abi(abi_element_identifier="redeemPositions", args=[USDC_ADDRESS, "0x" + "00" * 32, condition_id, [1, 2]])
+            
+            redeem_tx = SafeTransaction(
+                to=CTF,
+                data=data,
+                value="0",
+                operation=OperationType.Call
+            )
+
+            response = builder_client.execute([redeem_tx], "Redeem positions")
+            if hasattr(response, 'wait'):
+                response.wait()
+            logger.log(f"Successfully redeemed {size} shares from {title}")
+        except Exception as e:
+            logger.log(f"Failed to redeem {title}: {e}", LogType.ERROR)
 
 
 def get_on_chain_usdc_balance(address: str):
