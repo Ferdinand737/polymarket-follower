@@ -7,6 +7,7 @@ import requests
 from requests.exceptions import RequestException
 from typing import List, Dict, Any
 from utils.logger import Logger, LogType
+from datetime import datetime
 import time
 
     
@@ -886,14 +887,27 @@ def redeem_activity(activity: Dict[str, Any]):
 
 
 # Track recently attempted redeems to avoid retrying failed redeems every cycle
-_attempted_redeems = {}  # conditionId -> timestamp of last attempt
-_REDEEM_RETRY_INTERVAL = 3600  # Only retry a failed redeem after 1 hour
+# conditionId -> (timestamp of last attempt, retry_after timestamp)
+# retry_after is derived from 429 reset time when rate limited, otherwise 1 hour
+_attempted_redeems = {}
+_REDEEM_RETRY_INTERVAL = 3600  # Default: only retry a failed redeem after 1 hour
+
+
+def _parse_rate_limit_reset(error_msg: str) -> float:
+    """Try to parse the 'resets in N seconds' from a 429 error.
+    Returns the epoch timestamp when the rate limit resets, or 0 if not parseable."""
+    import re
+    match = re.search(r'resets in (\d+) seconds', str(error_msg))
+    if match:
+        return time.time() + int(match.group(1))
+    return 0
 
 
 def redeem_all_positions():
     """Check all follower positions and redeem any that are redeemable.
     Called each cycle in the main loop to auto-redeem settled markets.
-    Tracks attempted redeems to avoid hammering the same failed position every cycle."""
+    Tracks attempted redeems to avoid hammering the same failed position every cycle.
+    When a 429 rate limit is hit, backs off until the reset time."""
     global _attempted_redeems
     
     positions = fetch_positions(POLY_MARKET_FUNDER_ADDRESS)
@@ -906,19 +920,21 @@ def redeem_all_positions():
         return
     
     now = time.time()
-    # Filter out positions we recently attempted (within the retry interval)
+    # Filter out positions we recently attempted (within their individual retry-after time)
     to_redeem = []
     skipped = []
     for p in redeemable:
         cid = p.get('conditionId')
-        last_attempt = _attempted_redeems.get(cid, 0)
-        if now - last_attempt < _REDEEM_RETRY_INTERVAL:
-            skipped.append(p.get('title', 'Unknown')[:50])
-        else:
-            to_redeem.append(p)
+        if cid in _attempted_redeems:
+            _, retry_after = _attempted_redeems[cid]
+            if now < retry_after:
+                remaining = int(retry_after - now)
+                skipped.append(f"{p.get('title', 'Unknown')[:50]} (retry in {remaining // 60}m)")
+                continue
+        to_redeem.append(p)
     
     if skipped:
-        logger.log(f"Skipping {len(skipped)} recently-attempted redeem(s): {', '.join(skipped)}")
+        logger.log(f"Skipping {len(skipped)} recently-attempted redeem(s): {'; '.join(skipped)}")
     
     if not to_redeem:
         return
@@ -931,8 +947,8 @@ def redeem_all_positions():
         condition_id = position.get('conditionId')
         logger.log(f"Redeeming {size} shares from {title}")
         
-        # Record the attempt
-        _attempted_redeems[condition_id] = now
+        # Record the attempt with default retry interval
+        _attempted_redeems[condition_id] = (now, now + _REDEEM_RETRY_INTERVAL)
         
         try:
             data = Web3().eth.contract(
@@ -954,7 +970,14 @@ def redeem_all_positions():
             # If successful, remove from attempted tracking so it won't be retried
             _attempted_redeems.pop(condition_id, None)
         except Exception as e:
+            error_str = str(e)
             logger.log(f"Failed to redeem {title}: {e}", LogType.ERROR)
+            # If rate limited (429), set retry-after to the reset time from the error
+            if '429' in error_str or 'quota exceeded' in error_str.lower():
+                reset_at = _parse_rate_limit_reset(error_str)
+                if reset_at:
+                    _attempted_redeems[condition_id] = (now, reset_at)
+                    logger.log(f"Rate limited. Will retry {title[:50]} after {datetime.fromtimestamp(reset_at)}")
 
 
 def get_on_chain_usdc_balance(address: str):
