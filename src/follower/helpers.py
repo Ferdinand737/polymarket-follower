@@ -397,6 +397,9 @@ def convert_activity(target_activity: Dict[str, Any]):
         return
     index_set = decode_index_set_from_tx(target_activity.get("transactionHash"))
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
+    target_cash = get_on_chain_usdc_balance(target_activity.get("proxyWallet"))
+    logger.log(f"Target cash: {target_cash}")
+    target_portfolio_value = target_portfolio_value + target_cash
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", LogType.WARNING)
         return
@@ -463,6 +466,9 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
     target_usdc_size = target_activity.get("usdcSize")
 
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
+    target_cash = get_on_chain_usdc_balance(target_activity.get("proxyWallet"))
+    logger.log(f"Target cash: {target_cash}")
+    target_portfolio_value = target_portfolio_value + target_cash
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", log_type=LogType.WARNING)
         return False
@@ -620,6 +626,9 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
     target_usdc_size = target_activity.get("usdcSize")
 
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
+    target_cash = get_on_chain_usdc_balance(target_activity.get("proxyWallet"))
+    logger.log(f"Target cash: {target_cash}")
+    target_portfolio_value = target_portfolio_value + target_cash
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", log_type=LogType.WARNING)
         return False
@@ -756,6 +765,9 @@ def split_activity(target_activity: Dict[str, Any]):
     partition = [1, 2]
     
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
+    target_cash = get_on_chain_usdc_balance(target_activity.get("proxyWallet"))
+    logger.log(f"Target cash: {target_cash}")
+    target_portfolio_value = target_portfolio_value + target_cash
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", LogType.WARNING)
         return
@@ -816,6 +828,9 @@ def merge_activity(target_activity: Dict[str, Any]):
     
    
     target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
+    target_cash = get_on_chain_usdc_balance(target_activity.get("proxyWallet"))
+    logger.log(f"Target cash: {target_cash}")
+    target_portfolio_value = target_portfolio_value + target_cash
     if not target_portfolio_value or target_portfolio_value == 0:
         logger.log("Target portfolio value is zero or unavailable, skipping.", LogType.WARNING)
         return
@@ -860,21 +875,50 @@ def merge_activity(target_activity: Dict[str, Any]):
         return  
 
 
-def redeem_activity(activity: Dict[str, Any]):
-    logger.log(f"Processing redeem activity: {activity.get('title')}")
+def _build_redeem_tx(condition_id: str, position: Dict[str, Any]) -> SafeTransaction:
+    """Build a redeem transaction, using NEG_RISK_ADAPTER for neg-risk markets."""
+    is_neg_risk = position.get("negativeRisk", False)
 
-    try:
+    if is_neg_risk:
+        # Neg-risk: NEG_RISK_ADAPTER.redeemPositions(bytes32 conditionId, uint256[] amounts)
+        # amounts = [yes_amount_raw, no_amount_raw] based on outcome
+        size = float(position.get('size', 0))
+        outcome_index = position.get('outcomeIndex', 0)
+        yes_amount = int(size * 10**6) if outcome_index == 0 else 0
+        no_amount = int(size * 10**6) if outcome_index == 1 else 0
+
+        data = Web3().eth.contract(
+            address=NEG_RISK_ADAPTER,
+            abi=[{"name": "redeemPositions", "type": "function", "inputs": [{"name": "_conditionId", "type": "bytes32"}, {"name": "_amounts", "type": "uint256[]"}], "outputs": []}]
+        ).encode_abi(abi_element_identifier="redeemPositions", args=[condition_id, [yes_amount, no_amount]])
+
+        logger.log(f"Neg-risk redeem via adapter: conditionId={condition_id}, amounts=[{yes_amount}, {no_amount}]")
+        return SafeTransaction(
+            to=NEG_RISK_ADAPTER,
+            data=data,
+            value="0",
+            operation=OperationType.Call
+        )
+    else:
+        # Standard: CTF.redeemPositions(address, bytes32, bytes32, uint256[])
         data = Web3().eth.contract(
             address=CTF,
             abi=[{"name": "redeemPositions", "type": "function", "inputs": [{"name": "collateralToken", "type": "address"}, {"name": "parentCollectionId", "type": "bytes32"}, {"name": "conditionId", "type": "bytes32"}, {"name": "indexSets", "type": "uint256[]"}], "outputs": []}]
-        ).encode_abi(abi_element_identifier="redeemPositions", args=[USDC_ADDRESS, "0x" + "00" * 32, activity.get("conditionId"), [1, 2]])
-        
-        redeem_tx = SafeTransaction(
+        ).encode_abi(abi_element_identifier="redeemPositions", args=[USDC_ADDRESS, "0x" + "00" * 32, condition_id, [1, 2]])
+
+        return SafeTransaction(
             to=CTF,
             data=data,
             value="0",
             operation=OperationType.Call
         )
+
+
+def redeem_activity(activity: Dict[str, Any]):
+    logger.log(f"Processing redeem activity: {activity.get('title')}")
+
+    try:
+        redeem_tx = _build_redeem_tx(activity.get("conditionId"), activity)
 
         logger.log("Executing redeem transaction...")
         response = builder_client.execute([redeem_tx], "Redeem positions")
@@ -945,23 +989,14 @@ def redeem_all_positions():
         title = position.get('title', 'Unknown')[:50]
         size = position.get('size', 0)
         condition_id = position.get('conditionId')
-        logger.log(f"Redeeming {size} shares from {title}")
+        is_neg_risk = position.get('negativeRisk', False)
+        logger.log(f"Redeeming {size} shares from {title} (neg-risk={is_neg_risk})")
         
         # Record the attempt with default retry interval
         _attempted_redeems[condition_id] = (now, now + _REDEEM_RETRY_INTERVAL)
         
         try:
-            data = Web3().eth.contract(
-                address=CTF,
-                abi=[{"name": "redeemPositions", "type": "function", "inputs": [{"name": "collateralToken", "type": "address"}, {"name": "parentCollectionId", "type": "bytes32"}, {"name": "conditionId", "type": "bytes32"}, {"name": "indexSets", "type": "uint256[]"}], "outputs": []}]
-            ).encode_abi(abi_element_identifier="redeemPositions", args=[USDC_ADDRESS, "0x" + "00" * 32, condition_id, [1, 2]])
-            
-            redeem_tx = SafeTransaction(
-                to=CTF,
-                data=data,
-                value="0",
-                operation=OperationType.Call
-            )
+            redeem_tx = _build_redeem_tx(condition_id, position)
 
             response = builder_client.execute([redeem_tx], "Redeem positions")
             if hasattr(response, 'wait'):
