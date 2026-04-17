@@ -105,19 +105,22 @@ def is_bot_running() -> bool:
 
 
 def get_bot_start_timestamp():
-    """Parse timestamp from first log line.  Returns datetime | None."""
+    """Parse timestamp of last 'Starting follower' log line.  Returns datetime | None."""
     if not LOG_FILE_PATH.exists():
         return None
+    last_start = None
     with open(LOG_FILE_PATH, "r") as f:
-        first_line = f.readline().strip()
-    if not first_line:
+        for line in f:
+            if "Starting follower" in line:
+                last_start = line.strip()
+    if not last_start:
         return None
     try:
-        s = first_line.find("[")
-        e = first_line.find("]")
+        s = last_start.find("[")
+        e = last_start.find("]")
         if s == -1 or e == -1:
             return None
-        dt = datetime.strptime(first_line[s + 1 : e], "%d-%B-%Y-%H:%M:%S")
+        dt = datetime.strptime(last_start[s + 1 : e], "%d-%B-%Y-%H:%M:%S")
         return dt
     except (ValueError, IndexError):
         return None
