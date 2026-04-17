@@ -21,16 +21,14 @@ class LogColors:
 
 class Logger:
 
-    def __init__(self, clear: bool = False):
+    def __init__(self, clear: bool = True):
         log_dir = Path(__file__).parent.parent.parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = log_dir / "polymarket_follower.log"
-        # Never clear logs automatically - this can happen when a duplicate
-        # process starts and wipes out evidence of the first process's work
-        # if clear:
-        #     if self.log_file.exists():
-        #         self.log_file.unlink()
-        #     self.log_file.touch()
+        if clear:
+            if self.log_file.exists():
+                self.log_file.unlink()
+            self.log_file.touch()
 
     def log(self, msg: str, log_type: LogType = LogType.INFO):
         date_and_time = datetime.now().strftime("%d-%B-%Y-%H:%M:%S").lower()
