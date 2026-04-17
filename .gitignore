@@ -4,3 +4,6 @@ logs/
 reports/
 .env
 plots/
+src/config/follower_config.json
+src/follower.pid
+src/last_processed_ts.txt
