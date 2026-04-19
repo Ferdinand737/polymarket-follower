@@ -126,9 +126,6 @@ def main():
                 if latest_ts > 0:
                     save_last_processed_ts(latest_ts + 1)
 
-            # Auto-redeem any settled positions
-            redeem_all_positions()
-
             # Prune consumed_transactions: since `start` param now correctly filters,
             # we'll never re-see activities older than last_processed_ts.
             # Safe to clear the consumed set after advancing the timestamp.
