@@ -97,14 +97,18 @@ client = ClobClient(host="https://clob.polymarket.com", key=PRIVATE_KEY, chain_i
 user_api_creds = client.create_or_derive_api_creds()
 
 
-client = ClobClient(
-    host="https://clob.polymarket.com",
-    key=PRIVATE_KEY,
-    chain_id=137,
-    creds=user_api_creds,
-    signature_type=2,
-    funder=POLY_MARKET_FUNDER_ADDRESS
-)
+def create_clob_client():
+    """Create a fresh ClobClient. Called at startup and periodically to prevent stale state."""
+    return ClobClient(
+        host="https://clob.polymarket.com",
+        key=PRIVATE_KEY,
+        chain_id=137,
+        creds=user_api_creds,
+        signature_type=2,
+        funder=POLY_MARKET_FUNDER_ADDRESS
+    )
+
+client = create_clob_client()
  
 builder_config = BuilderConfig(
     local_builder_creds=BuilderApiKeyCreds(
@@ -282,8 +286,11 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                     
                     # Process the aggregated trade
                     success = buy_activity(activity_to_process)
-                    # Mark all hashes as consumed
-                    add_consumed_transactions(agg["all_hashes"])
+                    # Only mark as consumed if the trade succeeded
+                    if success:
+                        add_consumed_transactions(agg["all_hashes"])
+                    else:
+                        logger.log(f"Aggregated buy failed, NOT marking {len(agg['all_hashes'])} tx(s) as consumed - will retry next cycle", LogType.WARNING)
                     continue
                 
                 # Get user position for SELL activities
@@ -300,6 +307,12 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                 success = False
                 if side == "SELL":
                     success = sell_activity(target_activity, user_token_position)
+                    if success:
+                        add_consumed_transactions([tx_hash])
+                    else:
+                        logger.log(f"Sell failed, NOT marking tx as consumed - will retry next cycle", LogType.WARNING)
+                else:
+                    # BUY (non-aggregated) - shouldn't reach here but handle it
                     add_consumed_transactions([tx_hash])
                 
             case "SPLIT":

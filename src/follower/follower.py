@@ -131,6 +131,12 @@ def main():
             # Safe to clear the consumed set after advancing the timestamp.
             clear_consumed_transactions()
 
+            # Re-initialize ClobClient to prevent stale state (order_version_mismatch)
+            from follower.helpers import create_clob_client
+            import follower.helpers as helpers
+            helpers.client = create_clob_client()
+            logger.log("Re-initialized ClobClient")
+
             for remaining in range(FOLLOWER_CHECK_INTERVAL_MINUTES * 60, 0, -1):
                 minutes = remaining // 60
                 seconds = remaining % 60
