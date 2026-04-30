@@ -286,11 +286,10 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                     
                     # Process the aggregated trade
                     success = buy_activity(activity_to_process)
-                    # Only mark as consumed if the trade succeeded
-                    if success:
-                        add_consumed_transactions(agg["all_hashes"])
-                    else:
-                        logger.log(f"Aggregated buy failed, NOT marking {len(agg['all_hashes'])} tx(s) as consumed - will retry next cycle", LogType.WARNING)
+                    # Mark as consumed regardless of success - failed trades are logged and skipped
+                    if not success:
+                        logger.log(f"Aggregated buy failed, skipping {len(agg['all_hashes'])} tx(s)", LogType.WARNING)
+                    add_consumed_transactions(agg["all_hashes"])
                     continue
                 
                 # Get user position for SELL activities
@@ -307,10 +306,9 @@ def process_new_activities(new_target_activities: List[Dict[str, Any]]):
                 success = False
                 if side == "SELL":
                     success = sell_activity(target_activity, user_token_position)
-                    if success:
-                        add_consumed_transactions([tx_hash])
-                    else:
-                        logger.log(f"Sell failed, NOT marking tx as consumed - will retry next cycle", LogType.WARNING)
+                    if not success:
+                        logger.log("Sell failed, skipping tx", LogType.WARNING)
+                    add_consumed_transactions([tx_hash])
                 else:
                     # BUY (non-aggregated) - shouldn't reach here but handle it
                     add_consumed_transactions([tx_hash])

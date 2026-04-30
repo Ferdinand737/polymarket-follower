@@ -121,47 +121,15 @@ def main():
             process_new_activities(target_activities)
 
             # Save timestamp AFTER processing so we don't skip activities on crash
-            # Only advance timestamp for activities that were successfully consumed
-            # If trades failed, they stay in consumed_transactions and will be retried,
-            # so we can't advance past them
             if target_activities:
-                consumed = get_consumed_transactions()
-                all_tx_hashes = {a.get('transactionHash') for a in target_activities}
-                unconsumed = all_tx_hashes - consumed
-                
-                if not unconsumed:
-                    # All activities were consumed (success or non-trade), safe to advance
-                    latest_ts = max(a.get('timestamp', 0) for a in target_activities)
-                    if latest_ts > 0:
-                        save_last_processed_ts(latest_ts + 1)
-                    clear_consumed_transactions()
-                else:
-                    # Some trades failed - only advance up to the earliest unconsumed activity
-                    # This ensures we'll re-fetch those activities next cycle
-                    unconsumed_ts = []
-                    for a in target_activities:
-                        if a.get('transactionHash') in unconsumed:
-                            unconsumed_ts.append(a.get('timestamp', 0))
-                    
-                    # Advance to just before the earliest failed activity
-                    if unconsumed_ts:
-                        min_fail_ts = min(unconsumed_ts)
-                        # Find the latest timestamp that's before the failed activity
-                        safe_ts = max(
-                            (a.get('timestamp', 0) for a in target_activities 
-                             if a.get('timestamp', 0) < min_fail_ts),
-                            default=None
-                        )
-                        if safe_ts is not None:
-                            save_last_processed_ts(safe_ts + 1)
-                            logger.log(f"{len(unconsumed)} failed trade(s) pending retry, advanced timestamp to {safe_ts + 1}")
-                        # Don't clear consumed - the failed ones need to be retried
-                    else:
-                        # Shouldn't happen but fallback
-                        latest_ts = max(a.get('timestamp', 0) for a in target_activities)
-                        if latest_ts > 0:
-                            save_last_processed_ts(latest_ts + 1)
-                        clear_consumed_transactions()
+                latest_ts = max(a.get('timestamp', 0) for a in target_activities)
+                if latest_ts > 0:
+                    save_last_processed_ts(latest_ts + 1)
+
+            # Prune consumed_transactions: since `start` param now correctly filters,
+            # we'll never re-see activities older than last_processed_ts.
+            # Safe to clear the consumed set after advancing the timestamp.
+            clear_consumed_transactions()
 
             # Re-initialize ClobClient to prevent stale state (order_version_mismatch)
             from follower.helpers import create_clob_client
