@@ -617,26 +617,45 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
     logger.log(f"Selling activity: {target_activity.get('title')}")
 
     target_usdc_size = target_activity.get("usdcSize")
+    condition_id = target_activity.get("conditionId")
+    target_address = target_activity.get("proxyWallet")
 
-    target_portfolio_value = get_portfolio_usdc_value(target_activity.get("proxyWallet"))
-    target_cash = get_on_chain_usdc_balance(target_activity.get("proxyWallet"))
-    logger.log(f"Target cash: {target_cash}")
-    target_portfolio_value = target_portfolio_value + target_cash
-    if not target_portfolio_value or target_portfolio_value == 0:
-        logger.log("Target portfolio value is zero or unavailable, skipping.", log_type=LogType.WARNING)
-        return False
+    # Check if target fully exited this position
+    # If so, we should sell ALL our shares, not just the proportional fraction
+    target_positions = fetch_positions(target_address)
+    target_still_holds = any(
+        p.get("conditionId") == condition_id and float(p.get("size", 0)) > 0
+        for p in target_positions
+    )
 
-    fraction_of_target_portfolio = target_usdc_size / target_portfolio_value
-    logger.log(f"Fraction of target portfolio: {fraction_of_target_portfolio}")
+    if not target_still_holds:
+        logger.log(f"Target fully exited {target_activity.get('title', '')[:50]}, selling all follower shares")
+        user_share_size = float(user_token_position.get("size", 0))
+        if user_share_size <= 0:
+            logger.log("Follower has no shares to sell.", log_type=LogType.WARNING)
+            return False
+        user_size_to_sell_usdc = user_share_size * float(user_token_position.get("curPrice", 0))
+        logger.log(f"Full exit sell: {user_share_size} shares, ~${user_size_to_sell_usdc:.2f} USDC")
+    else:
+        target_portfolio_value = get_portfolio_usdc_value(target_address)
+        target_cash = get_on_chain_usdc_balance(target_address)
+        logger.log(f"Target cash: {target_cash}")
+        target_portfolio_value = target_portfolio_value + target_cash
+        if not target_portfolio_value or target_portfolio_value == 0:
+            logger.log("Target portfolio value is zero or unavailable, skipping.", log_type=LogType.WARNING)
+            return False
 
-    user_portfolio_usdc_value = get_portfolio_usdc_value(POLY_MARKET_FUNDER_ADDRESS)
+        fraction_of_target_portfolio = target_usdc_size / target_portfolio_value
+        logger.log(f"Fraction of target portfolio: {fraction_of_target_portfolio}")
 
-    user_size_to_sell_usdc = round(fraction_of_target_portfolio * user_portfolio_usdc_value, 2)
+        user_portfolio_usdc_value = get_portfolio_usdc_value(POLY_MARKET_FUNDER_ADDRESS)
 
-    logger.log(f"User size to sell usdc: {user_size_to_sell_usdc}")
-    if user_size_to_sell_usdc < 1.0:
-        logger.log(f"Order size ${user_size_to_sell_usdc} is below $1 minimum, skipping.", log_type=LogType.WARNING)
-        return False
+        user_size_to_sell_usdc = round(fraction_of_target_portfolio * user_portfolio_usdc_value, 2)
+
+        logger.log(f"User size to sell usdc: {user_size_to_sell_usdc}")
+        if user_size_to_sell_usdc < 1.0:
+            logger.log(f"Order size ${user_size_to_sell_usdc} is below $1 minimum, skipping.", log_type=LogType.WARNING)
+            return False
 
     target_price = target_activity.get("price")
     if target_price is not None:
@@ -647,7 +666,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
 
     token_id = target_activity.get("asset")
 
-    user_share_size = user_token_position.get("size")
+    user_share_size = float(user_token_position.get("size", 0))
     needed_size = user_size_to_sell_usdc / target_price
     if user_share_size < needed_size:
         logger.log(f"User shares ({user_share_size}) is less than needed ({needed_size}), selling all available.", log_type=LogType.WARNING)
@@ -662,7 +681,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
             logger.log(f"Remaining USDC ${remaining_usdc} below $1 minimum, stopping.")
             break
 
-        sell_price = max(round(target_price - offset, 2), 0.01)
+        sell_price = min(max(round(target_price - offset, 2), 0.01), 0.999)
         user_size_to_sell = calculate_valid_size(remaining_usdc, sell_price, decimals=2)
 
         if user_size_to_sell <= 0:
