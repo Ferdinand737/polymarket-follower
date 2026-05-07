@@ -955,8 +955,7 @@ def get_total_usdc_balance(address: str):
     clob = get_clob_usdc_balance()
     logger.log(f"USDC balances - On-chain: ${on_chain:.2f}, CLOB: ${clob:.2f}, Total: ${on_chain + clob:.2f}")
     return on_chain + clob
-    
-    
+
 
 def get_portfolio_usdc_value(address: str):
     logger.log(f"Fetching portfolio usdc value for {address}")

@@ -14,6 +14,8 @@ import requests
 from datetime import datetime, timezone
 
 from utils.utils import get_follow_address, POLY_MARKET_FUNDER_ADDRESS, ETHERSCAN_API_KEY
+from py_clob_client_v2 import ClobClient
+from py_clob_client_v2.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -84,7 +86,45 @@ def fetch_on_chain_usdc(address: str) -> float:
     }
     resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
-    return int(resp.json().get("result", 0)) / 1e6
+    result = resp.json().get("result", "0")
+    if not result or not result.isdigit():
+        return 0.0
+    return int(result) / 1e6
+
+
+def fetch_clob_usdc_balance() -> float:
+    """Return USDC balance from the CLOB exchange (available for trading on Polymarket)."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        creds = ApiCreds(
+            api_key=os.getenv("POLY_MARKET_API_KEY"),
+            api_secret=os.getenv("POLY_MARKET_SECRET"),
+            api_passphrase=os.getenv("POLY_MARKET_PASSPHRASE"),
+        )
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            key=os.getenv("PRIVATE_KEY"),
+            chain_id=137,
+            creds=creds,
+            signature_type=2,
+            funder=POLY_MARKET_FUNDER_ADDRESS,
+        )
+        bal = client.get_balance_allowance(params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        balance_raw = bal.get("balance", "0")
+        if not balance_raw or not str(balance_raw).isdigit():
+            return 0.0
+        return int(balance_raw) / 10**6
+    except Exception as e:
+        print(f"  Warning: Failed to fetch CLOB balance: {e}")
+        return 0.0
+
+
+def fetch_total_usdc_balance(address: str) -> float:
+    """Return total USDC: on-chain + CLOB exchange balance."""
+    on_chain = fetch_on_chain_usdc(address)
+    clob = fetch_clob_usdc_balance()
+    return on_chain + clob
 
 
 # ========================================================================== #
@@ -312,6 +352,8 @@ def generate_report(
     target_cash: float,
     target_positions_value: float,
     follower_cash: float,
+    follower_on_chain_cash: float,
+    follower_clob_cash: float,
     follower_positions_value: float,
     target_positions: list,
     follower_positions: list,
@@ -355,7 +397,7 @@ def generate_report(
     lines.append(f"- Address: `{target_address}`")
     lines.append("")
     lines.append("**Follower**")
-    lines.append(f"- Cash: ${follower_cash:,.2f}")
+    lines.append(f"- Cash: ${follower_cash:,.2f} (on-chain: ${follower_on_chain_cash:,.2f}, CLOB: ${follower_clob_cash:,.2f})")
     lines.append(f"- Positions: ${follower_positions_value:,.2f}")
     lines.append(f"- Total: ${follower_total:,.2f}")
     lines.append(f"- Address: `{follower_address}`")
@@ -521,12 +563,15 @@ def main():
         target_positions_value = fetch_portfolio_value(target_address)
         follower_positions_value = fetch_portfolio_value(follower_address)
         target_cash = fetch_on_chain_usdc(target_address)
-        follower_cash = fetch_on_chain_usdc(follower_address)
+        follower_cash = fetch_total_usdc_balance(follower_address)
         target_total = target_cash + target_positions_value
         follower_total = follower_cash + follower_positions_value
 
+        follower_on_chain = fetch_on_chain_usdc(follower_address)
+        follower_clob = follower_cash - follower_on_chain
+
         print(f"  Target  — cash: ${target_cash:,.2f}  positions: ${target_positions_value:,.2f}  total: ${target_total:,.2f}")
-        print(f"  Follower — cash: ${follower_cash:,.2f}  positions: ${follower_positions_value:,.2f}  total: ${follower_total:,.2f}")
+        print(f"  Follower — cash: ${follower_cash:,.2f} (on-chain: ${follower_on_chain:,.2f}, CLOB: ${follower_clob:,.2f})  positions: ${follower_positions_value:,.2f}  total: ${follower_total:,.2f}")
 
         min_order = calculate_min_target_order(target_positions_value, follower_total)
         print(f"  Min target order to copy: ${min_order:,.2f}")
@@ -590,6 +635,8 @@ def main():
             target_cash=target_cash,
             target_positions_value=target_positions_value,
             follower_cash=follower_cash,
+            follower_on_chain_cash=follower_on_chain,
+            follower_clob_cash=follower_clob,
             follower_positions_value=follower_positions_value,
             target_positions=target_positions,
             follower_positions=follower_positions,
