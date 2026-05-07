@@ -486,7 +486,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
 
     user_portfolio_usdc_value = get_portfolio_usdc_value(POLY_MARKET_FUNDER_ADDRESS)
 
-    user_cash = get_on_chain_usdc_balance(POLY_MARKET_FUNDER_ADDRESS)
+    user_cash = get_total_usdc_balance(POLY_MARKET_FUNDER_ADDRESS)
     logger.log(f"User cash: {user_cash}")
 
     user_total_usdc_value = user_portfolio_usdc_value + user_cash
@@ -816,7 +816,7 @@ def split_activity(target_activity: Dict[str, Any]):
     
     logger.log(f"Split details - conditionId: {condition_id}, amount: {user_size_to_split}, partition: {partition}")
     
-    user_cash = get_on_chain_usdc_balance(POLY_MARKET_FUNDER_ADDRESS)
+    user_cash = get_total_usdc_balance(POLY_MARKET_FUNDER_ADDRESS)
     logger.log(f"User USDC balance: {user_cash}")
 
     if user_size_to_split_usdc > user_cash:
@@ -925,11 +925,36 @@ def get_on_chain_usdc_balance(address: str):
     
     try:
         balance_data = with_retry(_fetch, max_retries=3, base_delay=2.0)()
-        balance = int(balance_data.get("result", 0)) / 10**6
+        result = balance_data.get("result", "0")
+        if not result or not result.isdigit():
+            return 0.0
+        balance = int(result) / 10**6
         return balance
     except Exception as e:
         logger.log(f"Failed to fetch USDC balance after retries: {e}", LogType.ERROR)
         raise
+
+
+def get_clob_usdc_balance():
+    """Fetch USDC balance from the CLOB exchange (available for trading on Polymarket)."""
+    from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+    try:
+        bal = client.get_balance_allowance(params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        balance_raw = bal.get("balance", "0")
+        if not balance_raw or not str(balance_raw).isdigit():
+            return 0.0
+        return int(balance_raw) / 10**6
+    except Exception as e:
+        logger.log(f"Failed to fetch CLOB USDC balance: {e}", LogType.WARNING)
+        return 0.0
+
+
+def get_total_usdc_balance(address: str):
+    """Get total USDC available for trading: on-chain + CLOB exchange balance."""
+    on_chain = get_on_chain_usdc_balance(address)
+    clob = get_clob_usdc_balance()
+    logger.log(f"USDC balances - On-chain: ${on_chain:.2f}, CLOB: ${clob:.2f}, Total: ${on_chain + clob:.2f}")
+    return on_chain + clob
     
     
 
