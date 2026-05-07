@@ -11,8 +11,8 @@ from datetime import datetime
 import time
 
     
-from py_clob_client import ClobClient, OrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client_v2 import ClobClient, OrderArgsV2, OrderType
+from py_clob_client_v2.clob_types import ApiCreds
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 from py_builder_relayer_client.client import RelayClient, BuilderConfig
 from py_builder_relayer_client.models import SafeTransaction, OperationType
@@ -93,8 +93,12 @@ def calculate_valid_size(usdc_amount: float, price: float, decimals: int = 4) ->
     return round(size, decimals)
 
 
-client = ClobClient(host="https://clob.polymarket.com", key=PRIVATE_KEY, chain_id=137)
-user_api_creds = client.create_or_derive_api_creds()
+# Use v2 API credentials from .env
+user_api_creds = ApiCreds(
+    api_key=POLY_MARKET_API_KEY,
+    api_secret=POLY_MARKET_SECRET,
+    api_passphrase=POLY_MARKET_PASSPHRASE
+)
 
 
 def create_clob_client():
@@ -146,10 +150,10 @@ def sell_position(position: Dict[str, Any]):
     while current_price >= min_price:
         logger.log(f"Attempting to sell {size} shares at price: {current_price}")
 
-        order_args = OrderArgs(
+        order_args = OrderArgsV2(
             price=current_price,
             size=size,
-            side=SELL,
+            side='SELL',
             token_id=token_id,
         )
 
@@ -162,7 +166,7 @@ def sell_position(position: Dict[str, Any]):
         try:
             resp = client.post_order(signed_order, OrderType.FAK)
             status = resp.get("status")
-            if status == "MATCHED":
+            if status and status.upper() == "MATCHED":
                 logger.log(f"FAK order filled! Sold {size} shares at {current_price}")
                 return
             else:
@@ -568,10 +572,10 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
 
         # Convert via string to ensure exact precision - this prevents float representation issues
         # The API requires: maker_amount (size*price) with max 2 decimals, taker_amount (size) with max 4 decimals
-        order_args = OrderArgs(
+        order_args = OrderArgsV2(
             price=float(f"{price:.2f}"),
             size=float(f"{size:.2f}"),  # Using 2 decimals since that's what we validated
-            side=BUY,
+            side='BUY',
             token_id=target_activity.get("asset"),
         )
 
@@ -586,7 +590,7 @@ def buy_activity(target_activity: Dict[str, Any]) -> bool:
             status = resp.get("status")
             making_amount = resp.get("makingAmount", "")
             
-            if status == "MATCHED":
+            if status and status.upper() == "MATCHED":
                 filled_usdc = float(making_amount) if making_amount else order_value
                 total_filled_usdc += filled_usdc
                 remaining_usdc -= filled_usdc
@@ -721,10 +725,10 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
 
         # Convert via string to ensure exact precision - this prevents float representation issues
         # The API requires: maker_amount (size*price) with max 2 decimals, taker_amount (size) with max 4 decimals
-        order_args = OrderArgs(
+        order_args = OrderArgsV2(
             price=float(f"{price:.2f}"),
             size=float(f"{size:.2f}"),  # Using 2 decimals since that's what we validated
-            side=SELL,
+            side='SELL',
             token_id=token_id,
         )
 
@@ -740,7 +744,7 @@ def sell_activity(target_activity: Dict[str, Any], user_token_position: Dict[str
             # For SELL: takingAmount = USDC received, makingAmount = shares given
             taking_amount = resp.get("takingAmount", "")
             
-            if status == "MATCHED":
+            if status and status.upper() == "MATCHED":
                 filled_usdc = float(taking_amount) if taking_amount else order_value
                 total_filled_usdc += filled_usdc
                 remaining_usdc -= filled_usdc
