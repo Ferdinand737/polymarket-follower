@@ -22,7 +22,9 @@ class LogColors:
 class Logger:
 
     def __init__(self, clear: bool = True):
-        log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
+        # Resolve log directory relative to the app root (where follower/ and utils/ live)
+        app_root = Path(__file__).resolve().parent.parent
+        log_dir = app_root / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = log_dir / "polymarket_follower.log"
         if clear:

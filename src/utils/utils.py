@@ -13,7 +13,9 @@ POLY_MARKET_FUNDER_ADDRESS = os.getenv("POLY_MARKET_FUNDER_ADDRESS")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
 
-FOLLOWER_CHECK_INTERVAL_MINUTES = 5
+ADDRESS_TO_FOLLOW = os.getenv("ADDRESS_TO_FOLLOW")
+
+FOLLOWER_CHECK_INTERVAL_MINUTES = int(os.getenv("FOLLOWER_CHECK_INTERVAL_MINUTES", "5"))
 
 CONFIG_FILE = Path(__file__).resolve().parent.parent / "config" / "follower_config.json"
 CTF = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
@@ -58,15 +60,23 @@ def is_valid_address(address):
 
 
 def get_follow_address():
-    """Get the address to follow from config."""
+    """Get the address to follow from env var or config."""
+    # Priority 1: Environment variable (Docker mode)
+    if ADDRESS_TO_FOLLOW:
+        address = ADDRESS_TO_FOLLOW.strip().lower()
+        if is_valid_address(address):
+            return address
+        raise ValueError(f"ADDRESS_TO_FOLLOW env var is invalid: {address}")
+    
+    # Priority 2: Config file (legacy mode)
     config = load_config()
     address = config.get("address_to_follow")
     
     if not address:
-        raise ValueError("No follow address configured. Use !set_address <address> to set one.")
+        raise ValueError("No follow address configured. Set ADDRESS_TO_FOLLOW env var or use config file.")
     
     if not is_valid_address(address):
-        raise ValueError("Follow address is invalid. Use !set_address <address> to set one.")
+        raise ValueError("Follow address is invalid. Set ADDRESS_TO_FOLLOW env var or use config file.")
     
     return address.lower()
 

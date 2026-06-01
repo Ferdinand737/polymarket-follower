@@ -7,3 +7,9 @@ plots/
 src/config/follower_config.json
 src/follower.pid
 src/last_processed_ts.txt
+
+# Bot instance directories (contain secrets)
+bots/
+
+# Docker volumes data
+*.tar.gz
