@@ -13,3 +13,6 @@ bots/
 
 # Docker volumes data
 *.tar.gz
+
+docker-compose.yml
+docker/docker-compose.yml
