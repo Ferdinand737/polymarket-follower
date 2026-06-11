@@ -8,38 +8,21 @@ services:
   # Use: python cli/polybot.py add/remove to manage bots.
   # ============================================================
 
-  gopfan2:
+  justdance:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: polybot-gopfan2
+    container_name: polybot-justdance
     restart: always
     env_file:
       - .env
-      - bots/gopfan2/.env
+      - bots/justdance/.env
     volumes:
-      - gopfan2-config:/app/config
-      - gopfan2-logs:/app/logs
-    environment:
-      - FOLLOWER_CHECK_INTERVAL_MINUTES=5
-
-  sunshine-smile:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    container_name: polybot-sunshine-smile
-    restart: always
-    env_file:
-      - .env
-      - bots/sunshine-smile/.env
-    volumes:
-      - sunshine-smile-config:/app/config
-      - sunshine-smile-logs:/app/logs
+      - justdance-config:/app/config
+      - justdance-logs:/app/logs
     environment:
       - FOLLOWER_CHECK_INTERVAL_MINUTES=5
 
 volumes:
-  gopfan2-config:
-  sunshine-smile-config:
-  gopfan2-logs:
-  sunshine-smile-logs:
+  justdance-config:
+  justdance-logs:

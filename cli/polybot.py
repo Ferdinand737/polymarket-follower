@@ -4,7 +4,8 @@ polybot - CLI for managing Polymarket follower bot instances.
 
 Commands:
     search       Search for high-quality copy-trading targets
-    add          Add a new bot instance
+    setup        Generate wallet and configure a new bot
+    add          Add a new bot instance from an env file
     list         List all bot instances
     start        Start a bot instance
     stop         Stop a bot instance
@@ -20,18 +21,55 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
-# Paths
+VENV_SITE = str(Path(__file__).resolve().parent.parent / "src" / "venv" / "lib")
+for p in sorted(Path(VENV_SITE).glob("python*/site-packages"), reverse=True):
+    if p.exists():
+        sys.path.insert(0, str(p))
+        break
+
+import re
+
+import requests
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOTS_DIR = REPO_ROOT / "docker" / "bots"
 DOCKER_DIR = REPO_ROOT / "docker"
 COMPOSE_FILE = DOCKER_DIR / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / "src" / ".env.example"
 
+SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def spinner(msg, event):
+    i = 0
+    while not event.is_set():
+        print(f"\r  {SPINNER_CHARS[i % len(SPINNER_CHARS)]} {msg}", end="", flush=True)
+        i += 1
+        time.sleep(0.08)
+    print(f"\r  ✔ {msg}")
+
+
+def run_spinner(msg, fn, *args, **kwargs):
+    event = threading.Event()
+    t = threading.Thread(target=spinner, args=(msg, event), daemon=True)
+    t.start()
+    try:
+        result = fn(*args, **kwargs)
+    except Exception as e:
+        event.set()
+        t.join()
+        print(f"\r  ✖ {msg}")
+        raise
+    event.set()
+    t.join()
+    return result
+
 
 def run_cmd(cmd, capture=True):
-    """Run a shell command."""
     if capture:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         return result.returncode, result.stdout, result.stderr
@@ -40,36 +78,29 @@ def run_cmd(cmd, capture=True):
 
 
 def docker_compose(*args):
-    """Run docker compose in the docker directory."""
     cmd = f"cd {DOCKER_DIR} && docker compose {' '.join(args)}"
     code, out, err = run_cmd(cmd)
     return code, out, err
 
 
 def load_compose():
-    """Load docker-compose.yml."""
     if not COMPOSE_FILE.exists():
         return {}
-    # Simple YAML parsing without pyyaml dependency
-    # We'll just manage it as text with markers
     return COMPOSE_FILE.read_text()
 
 
 def save_compose(content):
-    """Save docker-compose.yml."""
     COMPOSE_FILE.parent.mkdir(parents=True, exist_ok=True)
     COMPOSE_FILE.write_text(content)
 
 
 def get_bot_names():
-    """Get list of configured bot names from bots/ directory."""
     if not BOTS_DIR.exists():
         return []
     return [d.name for d in BOTS_DIR.iterdir() if d.is_dir() and (d / ".env").exists()]
 
 
 def generate_compose_service(name):
-    """Generate a docker-compose service block for a bot."""
     return f"""  {name}:
     build:
       context: ..
@@ -87,7 +118,6 @@ def generate_compose_service(name):
 
 
 def regenerate_compose():
-    """Regenerate docker-compose.yml from all bot directories."""
     bots = get_bot_names()
     if not bots:
         services = ""
@@ -117,12 +147,26 @@ volumes:
     save_compose(content)
 
 
+def parse_env_file(path):
+    env = {}
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        env[key] = value
+    return env
+
+
 # ============================================================
 # Commands
 # ============================================================
 
 def cmd_search(args):
-    """Search for high-quality copy-trading targets."""
     search_script = REPO_ROOT / "cli" / "search.py"
     cmd = f"python3 {search_script}"
     for flag in ["min-pnl", "min-roi", "min-win-rate", "min-markets", "sort", "limit",
@@ -152,27 +196,144 @@ REQUIRED_ENV_VARS = {
 }
 
 
-def parse_env_file(path):
-    """Parse a .env file into a dict, stripping quotes and ignoring comments."""
-    env = {}
-    for line in Path(path).read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        env[key] = value
-    return env
+def fetch_profile(address):
+    """Fetch Polymarket profile by wallet address. Returns username or None."""
+    try:
+        resp = requests.get(
+            "https://gamma-api.polymarket.com/public-profile",
+            params={"address": address},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("name") or data.get("pseudonym")
+    except Exception:
+        pass
+    return None
+
+
+def cmd_setup(args):
+    """Generate wallet and configure a new bot."""
+    print()
+    print("🤖  Polymarket Follower Bot Setup")
+    print("=" * 40)
+    print()
+    print("  First, create a fresh Polymarket account at:")
+    print("  👉 https://polymarket.com")
+    print()
+    print("  After signing up, come back here with:")
+    print("  - Your private key (from wallet settings)")
+    print("  - Your funder/proxy address (from https://polymarket.com/settings)")
+    print("  - The target address you want to follow")
+    print()
+
+    bot_name = args.name
+    if not bot_name:
+        bot_name = input("  📛 Bot name: ").strip()
+        if not bot_name:
+            print("  ✖ Bot name is required", file=sys.stderr)
+            sys.exit(1)
+    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', bot_name):
+        print("  ✖ Bot name must be lowercase alphanumeric with hyphens (no leading/trailing hyphens)", file=sys.stderr)
+        sys.exit(1)
+
+    private_key = args.private_key
+    if not private_key:
+        private_key = input("  🔑 Private key: ").strip()
+    if not private_key:
+        print("  ✖ Private key is required", file=sys.stderr)
+        sys.exit(1)
+
+    funder_address = args.funder
+    if not funder_address:
+        funder_address = input("  💰 Funder/proxy address (0x...): ").strip()
+    if not funder_address.startswith("0x") or len(funder_address) != 42:
+        print("  ✖ Invalid funder address", file=sys.stderr)
+        sys.exit(1)
+
+    target_address = args.target
+    if not target_address:
+        target_address = input("  🎯 Target address to follow (0x...): ").strip()
+    if not target_address.startswith("0x") or len(target_address) != 42:
+        print("  ✖ Invalid target address", file=sys.stderr)
+        sys.exit(1)
+
+    print()
+
+    bot_username = fetch_profile(funder_address) or ""
+    target_username = fetch_profile(target_address) or ""
+
+    if bot_username:
+        print(f"  ✔ Bot username: {bot_username}")
+    else:
+        print("  ⚠ Could not fetch bot username — set BOT_USERNAME manually later")
+
+    if target_username:
+        print(f"  ✔ Target username: {target_username}")
+    else:
+        print("  ⚠ Could not fetch target username — set TARGET_USERNAME manually later")
+
+    def create_creds():
+        from py_clob_client_v2 import ClobClient
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+        )
+        return client.create_or_derive_api_key()
+
+    creds = run_spinner("Creating API credentials", create_creds)
+    try:
+        api_key = creds["apiKey"]
+        api_secret = creds["secret"]
+        api_passphrase = creds["passphrase"]
+    except TypeError:
+        api_key = creds.api_key
+        api_secret = creds.api_secret
+        api_passphrase = creds.api_passphrase
+    print(f"    API key: {api_key}")
+
+    env_content = f"""BOT_NAME="{bot_name}"
+BOT_USERNAME="{bot_username}"
+BOT_PROFILE_URL="https://polymarket.com/@{bot_username}"
+
+PRIVATE_KEY="{private_key}"
+TARGET_ADDRESS="{target_address}"
+TARGET_USERNAME="{target_username}"
+TARGET_PROFILE_URL="https://polymarket.com/@{target_username}"
+
+POLY_MARKET_API_KEY="{api_key}"
+POLY_MARKET_SECRET="{api_secret}"
+POLY_MARKET_PASSPHRASE="{api_passphrase}"
+
+POLY_MARKET_FUNDER_ADDRESS="{funder_address}"
+"""
+
+    bot_dir = BOTS_DIR / bot_name
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    env_path = bot_dir / ".env"
+    env_path.write_text(env_content)
+
+    regenerate_compose()
+
+    print()
+    print("=" * 40)
+    print(f"  ✔ Bot '{bot_name}' configured!")
+    print()
+    print("  📋 Remaining manual steps:")
+    print()
+    print("  1. Approve trading & auto-redeem in the Polymarket UI")
+    print("  2. Deposit pUSD into your account")
+    print()
+    print(f"  Then start the bot:")
+    print(f"  👉 python cli/polybot.py start {bot_name}")
+    print()
 
 
 def cmd_add(args):
-    """Add a new bot instance from an env file."""
     env_path = Path(args.env_file)
     if not env_path.exists():
-        print(f"Error: file not found: {env_path}", file=sys.stderr)
+        print(f"✖ File not found: {env_path}", file=sys.stderr)
         sys.exit(1)
 
     env = parse_env_file(env_path)
@@ -182,7 +343,7 @@ def cmd_add(args):
 
     missing = [k for k, v in REQUIRED_ENV_VARS.items() if k not in env]
     if missing:
-        print(f"Error: missing required vars in env file: {', '.join(missing)}", file=sys.stderr)
+        print(f"✖ Missing required vars in env file: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
 
     name = env["BOT_NAME"]
@@ -209,23 +370,22 @@ POLY_MARKET_FUNDER_ADDRESS="{env['POLY_MARKET_FUNDER_ADDRESS']}"
 """
 
     (bot_dir / ".env").write_text(env_content)
-    print(f"Created {bot_dir / '.env'}")
+    print(f"✔ Created {bot_dir / '.env'}")
 
     regenerate_compose()
-    print("Updated docker-compose.yml")
+    print("✔ Updated docker-compose.yml")
 
-    print(f"\nBot '{name}' added! To start it:")
+    print(f"\n🤖 Bot '{name}' added! To start it:")
     print(f"  python cli/polybot.py start {name}")
 
 
 def cmd_list(args):
-    """List all bot instances."""
     bots = get_bot_names()
     if not bots:
-        print("No bots configured.")
-        print("Use: python cli/polybot.py add <env-file>")
+        print("No bots configured. Use: python cli/polybot.py setup")
         return
 
+    print(f"\n🤖 Polymarket Swarm")
     print(f"{'Name':<20} {'Bot':<40} {'Target':<40} {'Status'}")
     print("-" * 120)
     for name in bots:
@@ -244,13 +404,14 @@ def cmd_list(args):
             if target_username:
                 target_link = f"https://polymarket.com/@{target_username}"
 
-        print(f"{name:<20} {bot_link:<40} {target_link:<40} {status}")
+        status_icon = "🟢" if status == "running" else "🔴"
+        print(f"{name:<20} {bot_link:<40} {target_link:<40} {status_icon} {status}")
+    print()
 
 
 def cmd_start(args):
-    """Start a bot instance."""
     if not args.all and not args.name:
-        print("Error: provide a bot name or use --all", file=sys.stderr)
+        print("✖ Provide a bot name or use --all", file=sys.stderr)
         sys.exit(1)
     if args.all:
         bots = get_bot_names()
@@ -260,24 +421,31 @@ def cmd_start(args):
         for name in bots:
             code, _, _ = run_cmd(f"docker inspect --format '{{{{.State.Status}}}}' polybot-{name} 2>/dev/null")
             if code == 0:
-                print(f"Bot '{name}' already running, skipping.")
+                print(f"⏭  '{name}' already running, skipping.")
                 continue
-            code, out, err = docker_compose("up", "-d", "--build", name)
-            if code == 0:
-                print(f"Bot '{name}' started.")
-            else:
-                print(f"Failed to start bot '{name}'.", file=sys.stderr)
+
+            def start_one(n=name):
+                return docker_compose("up", "-d", "--build", n)
+
+            code, out, err = run_spinner(f"Starting '{name}'", start_one)
+            if code != 0:
+                print(f"\n  ✖ Failed to start '{name}'", file=sys.stderr)
                 if err:
                     print(err.strip(), file=sys.stderr)
                 if out:
                     print(out.strip(), file=sys.stderr)
         return
+
     name = args.name
-    code, out, err = docker_compose("up", "-d", "--build", name)
+
+    def start_one():
+        return docker_compose("up", "-d", "--build", name)
+
+    code, out, err = run_spinner(f"Starting '{name}'", start_one)
     if code == 0:
-        print(f"Bot '{name}' started.")
+        print(f"🟢 Bot '{name}' started!")
     else:
-        print(f"Failed to start bot '{name}'.", file=sys.stderr)
+        print(f"\n  ✖ Failed to start '{name}'", file=sys.stderr)
         if err:
             print(err.strip(), file=sys.stderr)
         if out:
@@ -285,9 +453,8 @@ def cmd_start(args):
 
 
 def cmd_stop(args):
-    """Stop a bot instance."""
     if not args.all and not args.name:
-        print("Error: provide a bot name or use --all", file=sys.stderr)
+        print("✖ Provide a bot name or use --all", file=sys.stderr)
         sys.exit(1)
     if args.all:
         bots = get_bot_names()
@@ -297,24 +464,28 @@ def cmd_stop(args):
         for name in bots:
             code, out, _ = run_cmd(f"docker inspect --format '{{{{.State.Status}}}}' polybot-{name} 2>/dev/null")
             if code != 0:
-                print(f"Bot '{name}' not running, skipping.")
+                print(f"⏭  '{name}' not running, skipping.")
                 continue
             code, out, err = docker_compose("stop", name)
             if code == 0:
-                print(f"Bot '{name}' stopped.")
+                print(f"🔴 Bot '{name}' stopped.")
             else:
-                print(f"Failed to stop bot '{name}'.", file=sys.stderr)
+                print(f"✖ Failed to stop '{name}'.", file=sys.stderr)
                 if err:
                     print(err.strip(), file=sys.stderr)
                 if out:
                     print(out.strip(), file=sys.stderr)
         return
     name = args.name
-    code, out, err = docker_compose("stop", name)
+
+    def stop_one():
+        return docker_compose("stop", name)
+
+    code, out, err = run_spinner(f"Stopping '{name}'", stop_one)
     if code == 0:
-        print(f"Bot '{name}' stopped.")
+        print(f"🔴 Bot '{name}' stopped.")
     else:
-        print(f"Failed to stop bot '{name}'.", file=sys.stderr)
+        print(f"\n  ✖ Failed to stop '{name}'.", file=sys.stderr)
         if err:
             print(err.strip(), file=sys.stderr)
         if out:
@@ -322,16 +493,18 @@ def cmd_stop(args):
 
 
 def cmd_restart(args):
-    """Restart a bot instance."""
     name = args.name
-    if name == "all":
-        code, out, err = docker_compose("restart")
-    else:
-        code, out, err = docker_compose("restart", name)
+
+    def restart_one():
+        if name == "all":
+            return docker_compose("restart")
+        return docker_compose("restart", name)
+
+    code, out, err = run_spinner(f"Restarting '{name}'", restart_one)
     if code == 0:
-        print(f"Bot '{name}' restarted.")
+        print(f"🔄 Bot '{name}' restarted.")
     else:
-        print(f"Failed to restart bot '{name}'.", file=sys.stderr)
+        print(f"\n  ✖ Failed to restart '{name}'.", file=sys.stderr)
         if err:
             print(err.strip(), file=sys.stderr)
         if out:
@@ -339,7 +512,6 @@ def cmd_restart(args):
 
 
 def cmd_logs(args):
-    """View bot logs."""
     name = args.name
     lines = args.lines or 50
     follow = "-f" if args.follow else ""
@@ -347,56 +519,53 @@ def cmd_logs(args):
 
 
 def cmd_status(args):
-    """Show detailed bot status."""
     name = args.name
     code, out, err = run_cmd(f"docker inspect --format '{{{{.State.Status}}}}' polybot-{name} 2>/dev/null")
     if code != 0:
-        print(f"Bot '{name}' is not running.")
+        print(f"🔴 Bot '{name}' is not running.")
         return
 
     status = out.strip()
-    print(f"Bot: {name}")
-    print(f"Container: polybot-{name}")
-    print(f"Status: {status}")
+    icon = "🟢" if status == "running" else "🔴"
+    print(f"🤖 Bot: {name}")
+    print(f"📦 Container: polybot-{name}")
+    print(f"{icon} Status: {status}")
 
-    # Show recent logs
     code, out, _ = docker_compose("logs", "--tail", "10", name)
     if out:
-        print(f"\nRecent logs:")
+        print(f"\n📝 Recent logs:")
         print(out)
 
 
 def cmd_remove(args):
-    """Remove a bot instance."""
     name = args.name
 
-    # Stop first
-    docker_compose("stop", name)
-    docker_compose("rm", "-f", name)
+    def remove_bot():
+        docker_compose("stop", name)
+        docker_compose("rm", "-f", name)
 
-    # Remove bot directory
+    run_spinner(f"Stopping '{name}'", remove_bot)
+
     bot_dir = BOTS_DIR / name
     if bot_dir.exists():
         shutil.rmtree(bot_dir)
-        print(f"Removed {bot_dir}")
+        print(f"🗑  Removed {bot_dir}")
 
-    # Remove Docker volumes
     for vol in [f"{name}-config", f"{name}-logs"]:
         run_cmd(f"docker volume rm {vol} 2>/dev/null")
 
-    # Regenerate compose
     regenerate_compose()
-    print(f"Bot '{name}' removed.")
+    print(f"🗑  Bot '{name}' removed.")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="polybot - Manage Polymarket follower bot instances"
+        description="🤖 polybot - Manage Polymarket follower bot instances"
     )
     subparsers = parser.add_subparsers(dest="command", help="Command")
 
     # search
-    p = subparsers.add_parser("search", help="Search for high-quality targets")
+    p = subparsers.add_parser("search", help="🔍 Search for high-quality targets")
     p.add_argument("--min-pnl", type=float, default=0)
     p.add_argument("--min-roi", type=float, default=0)
     p.add_argument("--min-win-rate", type=float, default=0)
@@ -412,39 +581,46 @@ def main():
     p.add_argument("--json", action="store_true", dest="as_json")
     p.add_argument("--categories", type=str, default="OVERALL")
 
+    # setup
+    p = subparsers.add_parser("setup", help="🚀 Configure a new bot")
+    p.add_argument("--name", help="Bot instance name")
+    p.add_argument("--private-key", help="Your private key")
+    p.add_argument("--funder", help="Your funder/proxy address (0x...)")
+    p.add_argument("--target", help="Target address to follow (0x...)")
+
     # add
-    p = subparsers.add_parser("add", help="Add a new bot instance from an env file")
+    p = subparsers.add_parser("add", help="➕ Add bot from env file")
     p.add_argument("env_file", help="Path to .env file")
 
     # list
-    subparsers.add_parser("list", help="List all bot instances")
+    subparsers.add_parser("list", help="📋 List all bot instances")
 
     # start
-    p = subparsers.add_parser("start", help="Start a bot")
+    p = subparsers.add_parser("start", help="▶ Start a bot")
     p.add_argument("name", nargs="?", help="Bot name")
     p.add_argument("-a", "--all", action="store_true", help="Start all bots that are not running")
 
     # stop
-    p = subparsers.add_parser("stop", help="Stop a bot")
+    p = subparsers.add_parser("stop", help="⏹ Stop a bot")
     p.add_argument("name", nargs="?", help="Bot name")
     p.add_argument("-a", "--all", action="store_true", help="Stop all bots that are running")
 
     # restart
-    p = subparsers.add_parser("restart", help="Restart a bot")
+    p = subparsers.add_parser("restart", help="🔄 Restart a bot")
     p.add_argument("name", help="Bot name or 'all'")
 
     # logs
-    p = subparsers.add_parser("logs", help="View bot logs")
+    p = subparsers.add_parser("logs", help="📜 View bot logs")
     p.add_argument("name", help="Bot name")
     p.add_argument("-f", "--follow", action="store_true", help="Follow logs")
     p.add_argument("--lines", type=int, default=50, help="Number of lines")
 
     # status
-    p = subparsers.add_parser("status", help="Show bot status")
+    p = subparsers.add_parser("status", help="📊 Show bot status")
     p.add_argument("name", help="Bot name")
 
     # remove
-    p = subparsers.add_parser("remove", help="Remove a bot instance")
+    p = subparsers.add_parser("remove", help="🗑 Remove a bot instance")
     p.add_argument("name", help="Bot name")
 
     args = parser.parse_args()
@@ -455,6 +631,7 @@ def main():
 
     commands = {
         "search": cmd_search,
+        "setup": cmd_setup,
         "add": cmd_add,
         "list": cmd_list,
         "start": cmd_start,
