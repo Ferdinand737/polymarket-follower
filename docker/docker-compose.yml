@@ -1,3 +1,5 @@
+name: polymarket-swarm
+
 services:
   # ============================================================
   # Polymarket Follower Bot - Multi-Instance Docker Compose
@@ -6,18 +8,38 @@ services:
   # Use: python cli/polybot.py add/remove to manage bots.
   # ============================================================
 
-  alan:
-    build: ..
-    container_name: polybot-alan
+  gopfan2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: polybot-gopfan2
     restart: always
     env_file:
-      - bots/alan/.env
+      - .env
+      - bots/gopfan2/.env
     volumes:
-      - alan-config:/app/config
-      - alan-logs:/app/logs
+      - gopfan2-config:/app/config
+      - gopfan2-logs:/app/logs
+    environment:
+      - FOLLOWER_CHECK_INTERVAL_MINUTES=5
+
+  sunshine-smile:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: polybot-sunshine-smile
+    restart: always
+    env_file:
+      - .env
+      - bots/sunshine-smile/.env
+    volumes:
+      - sunshine-smile-config:/app/config
+      - sunshine-smile-logs:/app/logs
     environment:
       - FOLLOWER_CHECK_INTERVAL_MINUTES=5
 
 volumes:
-  alan-config:
-  alan-logs:
+  gopfan2-config:
+  sunshine-smile-config:
+  gopfan2-logs:
+  sunshine-smile-logs:

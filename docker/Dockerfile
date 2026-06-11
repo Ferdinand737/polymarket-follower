@@ -15,7 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
 COPY src/follower/ ./follower/
-COPY src/utils/ ./utils/
 
 # Create directories for runtime state
 RUN mkdir -p /app/config /app/logs

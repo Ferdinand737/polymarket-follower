@@ -13,11 +13,11 @@ POLY_MARKET_FUNDER_ADDRESS = os.getenv("POLY_MARKET_FUNDER_ADDRESS")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
 
-ADDRESS_TO_FOLLOW = os.getenv("ADDRESS_TO_FOLLOW")
+ADDRESS_TO_FOLLOW = os.getenv("TARGET_ADDRESS") or os.getenv("ADDRESS_TO_FOLLOW")
 
 FOLLOWER_CHECK_INTERVAL_MINUTES = int(os.getenv("FOLLOWER_CHECK_INTERVAL_MINUTES", "5"))
 
-CONFIG_FILE = Path(__file__).resolve().parent.parent / "config" / "follower_config.json"
+CONFIG_FILE = Path(__file__).resolve().parent.parent.parent / "config" / "follower_config.json"
 CTF = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
