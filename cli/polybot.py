@@ -6,6 +6,7 @@ Commands:
     search       Search for high-quality copy-trading targets
     setup        Generate wallet and configure a new bot
     add          Add a new bot instance from an env file
+    edit         Edit a bot instance (interactive menu)
     list         List all bot instances
     start        Start a bot instance
     stop         Stop a bot instance
@@ -40,8 +41,13 @@ BOTS_DIR = REPO_ROOT / "docker" / "bots"
 DOCKER_DIR = REPO_ROOT / "docker"
 COMPOSE_FILE = DOCKER_DIR / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / "src" / ".env.example"
+DOCKER_ENV = DOCKER_DIR / ".env"
 
 SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def clear_screen():
+    print("\033[2J\033[H", end="", flush=True)
 
 
 def spinner(msg, event):
@@ -293,26 +299,21 @@ def cmd_setup(args):
         api_passphrase = creds.api_passphrase
     print(f"    API key: {api_key}")
 
-    env_content = f"""BOT_NAME="{bot_name}"
-BOT_USERNAME="{bot_username}"
-BOT_PROFILE_URL="https://polymarket.com/@{bot_username}"
-
-PRIVATE_KEY="{private_key}"
-TARGET_ADDRESS="{target_address}"
-TARGET_USERNAME="{target_username}"
-TARGET_PROFILE_URL="https://polymarket.com/@{target_username}"
-
-POLY_MARKET_API_KEY="{api_key}"
-POLY_MARKET_SECRET="{api_secret}"
-POLY_MARKET_PASSPHRASE="{api_passphrase}"
-
-POLY_MARKET_FUNDER_ADDRESS="{funder_address}"
-"""
+    env_data = {
+        "BOT_NAME": bot_name,
+        "BOT_USERNAME": bot_username,
+        "PRIVATE_KEY": private_key,
+        "TARGET_ADDRESS": target_address,
+        "TARGET_USERNAME": target_username,
+        "POLY_MARKET_API_KEY": api_key,
+        "POLY_MARKET_SECRET": api_secret,
+        "POLY_MARKET_PASSPHRASE": api_passphrase,
+        "POLY_MARKET_FUNDER_ADDRESS": funder_address,
+    }
 
     bot_dir = BOTS_DIR / bot_name
     bot_dir.mkdir(parents=True, exist_ok=True)
-    env_path = bot_dir / ".env"
-    env_path.write_text(env_content)
+    write_env_file(env_data, bot_dir / ".env")
 
     regenerate_compose()
 
@@ -347,29 +348,11 @@ def cmd_add(args):
         sys.exit(1)
 
     name = env["BOT_NAME"]
-    bot_username = env["BOT_USERNAME"]
-    target_username = env["TARGET_USERNAME"]
 
     bot_dir = BOTS_DIR / name
     bot_dir.mkdir(parents=True, exist_ok=True)
 
-    env_content = f"""BOT_NAME="{env['BOT_NAME']}"
-BOT_USERNAME="{env['BOT_USERNAME']}"
-BOT_PROFILE_URL="https://polymarket.com/@{bot_username}"
-
-PRIVATE_KEY="{env['PRIVATE_KEY']}"
-TARGET_ADDRESS="{env['TARGET_ADDRESS']}"
-TARGET_USERNAME="{env['TARGET_USERNAME']}"
-TARGET_PROFILE_URL="https://polymarket.com/@{target_username}"
-
-POLY_MARKET_API_KEY="{env['POLY_MARKET_API_KEY']}"
-POLY_MARKET_SECRET="{env['POLY_MARKET_SECRET']}"
-POLY_MARKET_PASSPHRASE="{env['POLY_MARKET_PASSPHRASE']}"
-
-POLY_MARKET_FUNDER_ADDRESS="{env['POLY_MARKET_FUNDER_ADDRESS']}"
-"""
-
-    (bot_dir / ".env").write_text(env_content)
+    write_env_file(env, bot_dir / ".env")
     print(f"✔ Created {bot_dir / '.env'}")
 
     regenerate_compose()
@@ -379,33 +362,100 @@ POLY_MARKET_FUNDER_ADDRESS="{env['POLY_MARKET_FUNDER_ADDRESS']}"
     print(f"  python cli/polybot.py start {name}")
 
 
+def fetch_portfolio_value(address):
+    try:
+        resp = requests.get(
+            "https://data-api.polymarket.com/value",
+            params={"user": address},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return float(data[0].get("value", 0))
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+PUSD_CONTRACT = "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb"
+
+
+def fetch_cash_balance(address):
+    if not DOCKER_ENV.exists():
+        return 0.0
+    docker_env = parse_env_file(DOCKER_ENV)
+    etherscan_key = docker_env.get("ETHERSCAN_API_KEY", "")
+    if not etherscan_key or not address:
+        return 0.0
+    try:
+        resp = requests.get(
+            "https://api.etherscan.io/v2/api",
+            params={
+                "chainid": 137,
+                "module": "account",
+                "action": "tokenbalance",
+                "contractaddress": PUSD_CONTRACT,
+                "address": address,
+                "tag": "latest",
+                "apikey": etherscan_key,
+            },
+            timeout=10,
+        )
+        data = resp.json()
+        result = data.get("result", "0")
+        if not result or not result.isdigit():
+            return 0.0
+        return int(result) / 10**6
+    except Exception:
+        return 0.0
+
+
 def cmd_list(args):
     bots = get_bot_names()
     if not bots:
         print("No bots configured. Use: python cli/polybot.py setup")
         return
 
+    def collect_data():
+        rows = []
+        total_portfolio = 0.0
+        total_cash = 0.0
+        for name in bots:
+            code, out, _ = run_cmd(f"docker inspect --format '{{{{.State.Status}}}}' polybot-{name} 2>/dev/null")
+            status = out.strip() if code == 0 else "not running"
+            env_file = BOTS_DIR / name / ".env"
+            bot_link = ""
+            target_link = ""
+            value = 0.0
+            if env_file.exists():
+                env = parse_env_file(env_file)
+                bot_username = env.get("BOT_USERNAME", "")
+                if bot_username:
+                    bot_link = f"https://polymarket.com/@{bot_username}"
+                target_username = env.get("TARGET_USERNAME", "")
+                if target_username:
+                    target_link = f"https://polymarket.com/@{target_username}"
+                funder = env.get("POLY_MARKET_FUNDER_ADDRESS", "")
+                if funder:
+                    portfolio = fetch_portfolio_value(funder)
+                    cash = fetch_cash_balance(funder)
+                    total_portfolio += portfolio
+                    total_cash += cash
+            status_icon = "🟢" if status == "running" else "🔴"
+            rows.append((name, bot_link, target_link, portfolio, cash, status_icon, status))
+        return rows, total_portfolio, total_cash
+
+    rows, total_portfolio, total_cash = run_spinner("Fetching balances", collect_data)
+
     print(f"\n🤖 Polymarket Swarm")
-    print(f"{'Name':<20} {'Bot':<40} {'Target':<40} {'Status'}")
-    print("-" * 120)
-    for name in bots:
-        code, out, _ = run_cmd(f"docker inspect --format '{{{{.State.Status}}}}' polybot-{name} 2>/dev/null")
-        status = out.strip() if code == 0 else "not running"
-
-        env_file = BOTS_DIR / name / ".env"
-        bot_link = ""
-        target_link = ""
-        if env_file.exists():
-            env = parse_env_file(env_file)
-            bot_username = env.get("BOT_USERNAME", "")
-            if bot_username:
-                bot_link = f"https://polymarket.com/@{bot_username}"
-            target_username = env.get("TARGET_USERNAME", "")
-            if target_username:
-                target_link = f"https://polymarket.com/@{target_username}"
-
-        status_icon = "🟢" if status == "running" else "🔴"
-        print(f"{name:<20} {bot_link:<40} {target_link:<40} {status_icon} {status}")
+    print(f"{'Name':<20} {'Bot':<40} {'Target':<40} {'Portfolio':>10} {'Cash':>10} {'Total':>10} {'Status'}")
+    print("-" * 155)
+    for name, bot_link, target_link, portfolio, cash, status_icon, status in rows:
+        total = portfolio + cash
+        print(f"{name:<20} {bot_link:<40} {target_link:<40} {f'${portfolio:.2f}':>10} {f'${cash:.2f}':>10} {f'${total:.2f}':>10} {status_icon} {status}")
+    print("-" * 155)
+    print(f"{'Total':<20} {'':<40} {'':<40} {f'${total_portfolio:.2f}':>10} {f'${total_cash:.2f}':>10} {f'${total_portfolio + total_cash:.2f}':>10}")
     print()
 
 
@@ -537,6 +587,202 @@ def cmd_status(args):
         print(out)
 
 
+def write_env_file(env, path):
+    env_content = f"""BOT_NAME="{env['BOT_NAME']}"
+BOT_USERNAME="{env['BOT_USERNAME']}"
+BOT_PROFILE_URL="https://polymarket.com/@{env['BOT_USERNAME']}"
+
+PRIVATE_KEY="{env['PRIVATE_KEY']}"
+TARGET_ADDRESS="{env['TARGET_ADDRESS']}"
+TARGET_USERNAME="{env['TARGET_USERNAME']}"
+TARGET_PROFILE_URL="https://polymarket.com/@{env['TARGET_USERNAME']}"
+
+POLY_MARKET_API_KEY="{env['POLY_MARKET_API_KEY']}"
+POLY_MARKET_SECRET="{env['POLY_MARKET_SECRET']}"
+POLY_MARKET_PASSPHRASE="{env['POLY_MARKET_PASSPHRASE']}"
+
+POLY_MARKET_FUNDER_ADDRESS="{env['POLY_MARKET_FUNDER_ADDRESS']}"
+"""
+    Path(path).write_text(env_content)
+
+
+def username_to_dir_name(username):
+    if not username:
+        return None
+    name = re.sub(r'[^a-zA-Z0-9-]', '-', username).lower()
+    name = re.sub(r'-+', '-', name).strip('-')
+    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', name):
+        return None
+    return name
+
+
+def cmd_edit(args):
+    name = args.name
+    bot_dir = BOTS_DIR / name
+    env_path = bot_dir / ".env"
+
+    if not env_path.exists():
+        print(f"✖ Bot '{name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    env = parse_env_file(env_path)
+
+    def show_current():
+        print()
+        print(f"  📋 Current config for '{name}':")
+        print(f"     Bot username:     {env.get('BOT_USERNAME', '')}")
+        print(f"     Bot profile:      https://polymarket.com/@{env.get('BOT_USERNAME', '')}")
+        print(f"     Private key:      {env.get('PRIVATE_KEY', '')[:8]}...")
+        print(f"     Funder address:   {env.get('POLY_MARKET_FUNDER_ADDRESS', '')}")
+        print(f"     Target address:   {env.get('TARGET_ADDRESS', '')}")
+        print(f"     Target username:  {env.get('TARGET_USERNAME', '')}")
+        print(f"     Target profile:   https://polymarket.com/@{env.get('TARGET_USERNAME', '')}")
+        print(f"     API key:          {env.get('POLY_MARKET_API_KEY', '')[:12]}...")
+        print()
+
+    def show_menu():
+        print("  What do you want to edit?")
+        print()
+        print("  1) Target address")
+        print("  2) API credentials (key, secret, passphrase)")
+        print("  3) Private key")
+        print("  4) Funder address")
+        print("  5) Bot name (set to Polymarket username)")
+        print("  6) Done / Exit")
+        print()
+
+    renamed = False
+    new_name = name
+
+    while True:
+        clear_screen()
+        show_current()
+        show_menu()
+        choice = input("  Select [1-6]: ").strip()
+
+        if choice == "1":
+            new_addr = input(f"  🎯 New target address (current: {env['TARGET_ADDRESS']}): ").strip()
+            if not new_addr:
+                print("  ⏭  No change.")
+                continue
+            if not new_addr.startswith("0x") or len(new_addr) != 42:
+                print("  ✖ Invalid address (must be 0x... 42 chars)", file=sys.stderr)
+                continue
+
+            username = run_spinner("Fetching target profile", fetch_profile, new_addr)
+            if username:
+                print(f"  ✔ Target username: {username}")
+                env["TARGET_ADDRESS"] = new_addr
+                env["TARGET_USERNAME"] = username
+            else:
+                print("  ⚠ Could not fetch username. Enter it manually or leave blank to skip.")
+                manual = input("  Target username: ").strip()
+                env["TARGET_ADDRESS"] = new_addr
+                env["TARGET_USERNAME"] = manual if manual else env.get("TARGET_USERNAME", "")
+
+        elif choice == "2":
+            print()
+            new_key = input(f"  API key (current: {env['POLY_MARKET_API_KEY'][:12]}...): ").strip()
+            new_secret = input(f"  API secret (current: {env['POLY_MARKET_SECRET'][:8]}...): ").strip()
+            new_pass = input(f"  API passphrase (current: {env['POLY_MARKET_PASSPHRASE'][:8]}...): ").strip()
+            if new_key:
+                env["POLY_MARKET_API_KEY"] = new_key
+            if new_secret:
+                env["POLY_MARKET_SECRET"] = new_secret
+            if new_pass:
+                env["POLY_MARKET_PASSPHRASE"] = new_pass
+            if new_key or new_secret or new_pass:
+                print("  ✔ API credentials updated.")
+            else:
+                print("  ⏭  No changes.")
+
+        elif choice == "3":
+            new_pk = input(f"  🔑 New private key (current: {env['PRIVATE_KEY'][:8]}...): ").strip()
+            if new_pk:
+                env["PRIVATE_KEY"] = new_pk
+                print("  ✔ Private key updated.")
+            else:
+                print("  ⏭  No change.")
+
+        elif choice == "4":
+            new_funder = input(f"  💰 New funder address (current: {env['POLY_MARKET_FUNDER_ADDRESS']}): ").strip()
+            if not new_funder:
+                print("  ⏭  No change.")
+                continue
+            if not new_funder.startswith("0x") or len(new_funder) != 42:
+                print("  ✖ Invalid address", file=sys.stderr)
+                continue
+            env["POLY_MARKET_FUNDER_ADDRESS"] = new_funder
+            username = run_spinner("Fetching bot profile", fetch_profile, new_funder)
+            if username:
+                print(f"  ✔ Bot username: {username}")
+                env["BOT_USERNAME"] = username
+            print("  ✔ Funder address updated.")
+
+        elif choice == "5":
+            current_dir_name = new_name
+            suggested = username_to_dir_name(env.get("BOT_USERNAME", ""))
+            print(f"  Current bot name: {current_dir_name}")
+            print(f"  Bot username:     {env.get('BOT_USERNAME', '')}")
+            if suggested and suggested != current_dir_name:
+                print(f"  Suggested name:   {suggested}")
+            manual = input(f"  New bot name (Enter for '{suggested or current_dir_name}', blank to skip): ").strip()
+            chosen = manual if manual else suggested
+            if not chosen or chosen == current_dir_name:
+                print("  ⏭  No change.")
+                continue
+            if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', chosen):
+                print("  ✖ Name must be lowercase alphanumeric with hyphens", file=sys.stderr)
+                continue
+            if (BOTS_DIR / chosen).exists() and chosen != current_dir_name:
+                print(f"  ✖ Bot directory '{chosen}' already exists", file=sys.stderr)
+                continue
+            env["BOT_NAME"] = chosen
+            new_name = chosen
+            renamed = True
+            print(f"  ✔ Bot name will be renamed to '{chosen}' on save.")
+
+        elif choice == "6":
+            break
+
+        else:
+            print("  ✖ Invalid choice")
+
+    if renamed and new_name != name:
+        def rename_bot():
+            docker_compose("stop", name)
+            docker_compose("rm", "-f", name)
+
+        run_spinner(f"Stopping '{name}'", rename_bot)
+
+        old_dir = BOTS_DIR / name
+        new_dir = BOTS_DIR / new_name
+        old_dir.rename(new_dir)
+
+        for old_vol, new_vol in [(f"{name}-config", f"{new_name}-config"), (f"{name}-logs", f"{new_name}-logs")]:
+            run_cmd(f"docker volume create {new_vol} 2>/dev/null")
+
+        regenerate_compose()
+        print(f"  ✔ Renamed '{name}' → '{new_name}'")
+        name = new_name
+
+    write_env_file(env, BOTS_DIR / name / ".env")
+    print(f"\n  ✔ Config saved for '{name}'")
+
+    restart = input(f"\n  Restart bot '{name}' now? [y/N]: ").strip().lower()
+    if restart == "y":
+        def restart_bot():
+            return docker_compose("up", "-d", "--build", name)
+
+        code, out, err = run_spinner(f"Restarting '{name}'", restart_bot)
+        if code == 0:
+            print(f"  🟢 Bot '{name}' restarted!")
+        else:
+            print(f"  ✖ Failed to restart", file=sys.stderr)
+            if err:
+                print(f"  {err.strip()}", file=sys.stderr)
+
+
 def cmd_remove(args):
     name = args.name
 
@@ -619,6 +865,10 @@ def main():
     p = subparsers.add_parser("status", help="📊 Show bot status")
     p.add_argument("name", help="Bot name")
 
+    # edit
+    p = subparsers.add_parser("edit", help="✏ Edit a bot instance")
+    p.add_argument("name", help="Bot name")
+
     # remove
     p = subparsers.add_parser("remove", help="🗑 Remove a bot instance")
     p.add_argument("name", help="Bot name")
@@ -633,6 +883,7 @@ def main():
         "search": cmd_search,
         "setup": cmd_setup,
         "add": cmd_add,
+        "edit": cmd_edit,
         "list": cmd_list,
         "start": cmd_start,
         "stop": cmd_stop,
